@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Production build
+dist/
+build/
+
+# Environment variables (keep example files)
+.env
+.env.local
+.env*.local
+
+# Logs
+logs/
+*.log
+uvicorn.out
+uvicorn.err
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Cache
+.turbo/
+.cache/

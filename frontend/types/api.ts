@@ -1,0 +1,111 @@
+/** Shared API types mirroring the FastAPI backend schemas. */
+
+export type DistanceMetric = 'l2' | 'cosine' | 'l1'
+export type RetrievalMethod = 'exact' | 'hnsw'
+
+export interface DatasetSummary {
+  id: number
+  name: string
+  source: string
+  n_rows: number
+  n_features: number
+  n_classes: number
+  dimension: number
+  class_labels: number[]
+  created_at: string
+}
+
+export interface IngestResponse {
+  dataset_id: number
+  name: string
+  n_train: number
+  n_test: number
+  dimension: number
+  n_classes: number
+  classes: number[]
+  class_distribution: number[]
+  preprocessing: Record<string, unknown>
+}
+
+export interface PerClassMetric {
+  label: number
+  precision: number
+  recall: number
+  f1: number
+  support: number
+}
+
+export interface Experiment {
+  id: number
+  dataset_id: number
+  name: string | null
+  retrieval_method: RetrievalMethod
+  k: number
+  distance_metric: DistanceMetric
+  hnsw_ef_search: number | null
+  hnsw_m: number | null
+  train_size: number
+  test_size: number
+  index_build_ms: number | null
+  recall_at_k: number | null
+  accuracy: number | null
+  macro_f1: number | null
+  precision_macro: number | null
+  recall_macro: number | null
+  latency_avg_ms: number | null
+  latency_p50_ms: number | null
+  latency_p95_ms: number | null
+  latency_p99_ms: number | null
+  total_runtime_s: number | null
+  used_index_scan: boolean | null
+  confusion_matrix: number[][]
+  per_class_metrics: PerClassMetric[]
+  status: string
+  error_message: string | null
+  created_at: string
+}
+
+export interface ExperimentRequest {
+  dataset_id: number
+  k: number
+  distance_metric: DistanceMetric
+  method: RetrievalMethod
+  ef_search?: number | null
+  hnsw_m?: number
+  hnsw_ef_construction?: number
+  max_queries?: number | null
+  name?: string | null
+  weighted_voting?: boolean
+}
+
+export interface ExperimentComparison {
+  exact: Experiment
+  approximate: Experiment
+  deltas: {
+    accuracy: number | null
+    macro_f1: number | null
+    recall_at_k: number | null
+    latency_avg_ms: number | null
+    latency_p50_ms: number | null
+    latency_p95_ms: number | null
+    speedup: number | null
+  }
+}
+
+export interface LatencySamples {
+  experiment_id: number
+  count: number
+  samples: number[]
+  p50: number
+  p90: number
+  p95: number
+  p99: number
+}
+
+export interface HealthStatus {
+  status: string
+  database: string
+  pgvector_version: string | null
+  dataset_count: number
+  experiment_count: number
+}
