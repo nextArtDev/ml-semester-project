@@ -87,7 +87,10 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         )
         vs.analyze(config.dataset_id)
     else:
-        vs.drop_hnsw_index(config.dataset_id)
+        # The exact baseline uses the pgvector distance *function*, which the
+        # planner can never satisfy with an index. Any existing HNSW index is
+        # therefore left in place - it simply cannot be used - which keeps a
+        # following HNSW run from paying the rebuild cost again.
         vs.analyze(config.dataset_id)
 
     # --- Ground truth (always exact) -------------------------------------

@@ -159,8 +159,24 @@ def create_hnsw_index(
     metric: DistanceMetric,
     m: int = 16,
     ef_construction: int = 64,
+    force: bool = False,
 ) -> float:
-    """Build the HNSW index and return the build time in milliseconds."""
+    """Build the HNSW index and return the build time in milliseconds.
+
+    If an index with the same parameters already exists it is reused, which
+    keeps an ``ef_search`` sweep cheap. Pass ``force=True`` to rebuild.
+    """
+    existing = get_hnsw_index(dataset_id)
+    if (
+        not force
+        and existing is not None
+        and existing["distance_metric"] == metric.value
+        and int(existing["m"]) == int(m)
+        and int(existing["ef_construction"]) == int(ef_construction)
+    ):
+        logger.info("Reusing existing HNSW index for dataset %s", dataset_id)
+        return float(existing["build_ms"] or 0.0)
+
     ops = {
         DistanceMetric.L2: "vector_l2_ops",
         DistanceMetric.COSINE: "vector_cosine_ops",
@@ -185,8 +201,43 @@ def create_hnsw_index(
                 )
             )
             elapsed = (time.perf_counter() - start) * 1000
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO hnsw_indexes "
+                    "(dataset_id, distance_metric, m, ef_construction, build_ms, built_at) "
+                    "VALUES (%s, %s, %s, %s, %s, now()) "
+                    "ON CONFLICT (dataset_id) DO UPDATE SET "
+                    "distance_metric = EXCLUDED.distance_metric, "
+                    "m = EXCLUDED.m, "
+                    "ef_construction = EXCLUDED.ef_construction, "
+                    "build_ms = EXCLUDED.build_ms, "
+                    "built_at = now()"
+                ),
+                (dataset_id, metric.value, int(m), int(ef_construction), elapsed),
+            )
     logger.info("HNSW index built in %.1f ms (m=%s, ef_construction=%s)", elapsed, m, ef_construction)
     return elapsed
+
+
+def get_hnsw_index(dataset_id: int) -> dict | None:
+    """Return the recorded HNSW index parameters for a dataset, if any."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM hnsw_indexes WHERE dataset_id = %s", (dataset_id,)
+            )
+            return cur.fetchone()
+
+
+def hnsw_index_exists(dataset_id: int) -> bool:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 AS present FROM pg_indexes "
+                "WHERE tablename = %s AND indexname = %s",
+                (train_table(dataset_id), index_name(dataset_id)),
+            )
+            return cur.fetchone() is not None
 
 
 def analyze(dataset_id: int) -> None:

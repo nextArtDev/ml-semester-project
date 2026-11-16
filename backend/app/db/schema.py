@@ -44,6 +44,23 @@ CREATE TABLE IF NOT EXISTS datasets (
 CREATE INDEX IF NOT EXISTS datasets_name_idx ON datasets (name);
 
 -- ---------------------------------------------------------------------------
+-- HNSW index registry
+--
+-- Rebuilding an HNSW index is expensive, and the ef_search sweep only varies
+-- a *query-time* parameter. This table records the parameters an index was
+-- built with so that repeated experiments can reuse the existing index
+-- instead of rebuilding it every time.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS hnsw_indexes (
+    dataset_id      BIGINT      PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+    distance_metric TEXT        NOT NULL,
+    m               INTEGER     NOT NULL,
+    ef_construction INTEGER     NOT NULL,
+    build_ms        DOUBLE PRECISION,
+    built_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
 -- Experiments
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS experiments (

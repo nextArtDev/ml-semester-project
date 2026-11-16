@@ -52,7 +52,12 @@ class PreprocessState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PreprocessState:
-        return cls(**data)
+        state = cls(**data)
+        # JSON object keys are always strings, so the label mapping has to be
+        # coerced back to integers.
+        state.label_to_index = {int(k): int(v) for k, v in state.label_to_index.items()}
+        state.class_labels = [int(v) for v in state.class_labels]
+        return state
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())

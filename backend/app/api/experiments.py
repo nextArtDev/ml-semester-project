@@ -27,20 +27,6 @@ def list_all(dataset_id: int | None = None, limit: int = 100) -> list[dict]:
     return list_experiments(dataset_id=dataset_id, limit=limit)
 
 
-@router.get("/{experiment_id}")
-def get_one(experiment_id: int) -> dict:
-    row = get_experiment(experiment_id)
-    if row is None:
-        raise HTTPException(404, "Experiment not found")
-    return row
-
-
-@router.delete("/{experiment_id}")
-def remove(experiment_id: int) -> dict:
-    delete_experiment(experiment_id)
-    return {"deleted": experiment_id}
-
-
 @router.post("/run")
 def run(request: ExperimentRequest) -> dict:
     """Run one experiment (exact baseline or HNSW approximate search)."""
@@ -65,12 +51,26 @@ def run(request: ExperimentRequest) -> dict:
         raise HTTPException(500, f"Experiment failed: {exc}") from exc
 
 
-@router.post("/compare")
+@router.get("/compare")
 def compare(exact_id: int, approximate_id: int) -> dict:
     try:
         return compare_experiments(exact_id, approximate_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{experiment_id}")
+def get_one(experiment_id: int) -> dict:
+    row = get_experiment(experiment_id)
+    if row is None:
+        raise HTTPException(404, "Experiment not found")
+    return row
+
+
+@router.delete("/{experiment_id}")
+def remove(experiment_id: int) -> dict:
+    delete_experiment(experiment_id)
+    return {"deleted": experiment_id}
 
 
 @router.get("/{experiment_id}/latencies")
