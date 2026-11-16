@@ -1,36 +1,17 @@
-# Dependencies
-node_modules/
-
-# Next.js build output
-.next/
-out/
-
-# Production build
-dist/
-build/
-
-# Environment variables (keep example files)
+__pycache__/
+*.py[cod]
+.venv/
 .env
-.env.local
-.env*.local
-
-# Logs
-logs/
-*.log
+data/
 uvicorn.out
 uvicorn.err
+.pytest_cache/
 
-# IDE / OS
-.vscode/
-.idea/
-.DS_Store
-
-# Python
-.venv/
-venv/
-__pycache__/
-*.pyc
-
-# Cache
-.turbo/
-.cache/
+node_modules/
+.next/
+out/
+.env.local
+.env*.local
+build.log
+*.tsbuildinfo
+next-env.d.ts

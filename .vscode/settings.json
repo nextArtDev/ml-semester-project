@@ -1,0 +1,10 @@
+{
+  "recommendations": ["cursor"],
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.next": true,
+    "**/node_modules": true,
+    "**/.venv": true
+  }
+}
