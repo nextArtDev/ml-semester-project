@@ -14,6 +14,8 @@ from pathlib import Path
 
 from docx import Document
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE_DIRS = ["backend/app", "backend/scripts", "frontend"]
 
@@ -74,16 +76,32 @@ def longest_prefix(haystack: list[str], needle: list[str]) -> int:
 def classify(text: str) -> str:
     """Classify a snippet so that only real source is held to the verbatim bar.
 
-    Shell command blocks, SQL listings and ASCII diagrams are illustrations
-    of what the reader types or sees, not excerpts of the source tree, so
-    they are reported separately.
+    Shell command blocks, SQL listings, equations and ASCII diagrams are
+    illustrations of what the reader types or sees, not excerpts of the
+    source tree, so they are reported separately.
     """
     stripped = text.strip()
-    first = stripped.splitlines()[0] if stripped else ""
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    first = lines[0] if lines else ""
 
+    if "argmax" in stripped or first.startswith(("ŷ", "ŷ(")):
+        return "equation"
     if first.startswith("ml-semester-project/") or first.startswith("CSV /"):
         return "diagram"
-    if first.startswith(("cd ", "git clone", "$PGVECTOR", "icacls", "psql ", "python -m")):
+    if first.startswith(
+        (
+            "cd ",
+            "git clone",
+            "$PGVECTOR",
+            "icacls",
+            "psql ",
+            "python -m",
+            "nmake",
+            "-- ",
+            "# ",
+            "curl",
+        )
+    ):
         return "command"
     if first.startswith(("CREATE ", "ALTER ", "SELECT ", "DROP ", "SET ")):
         return "sql"
@@ -113,7 +131,12 @@ def main() -> int:
     print()
 
     verbatim = 0
-    other: dict[str, list[int]] = {"command": [], "sql": [], "diagram": []}
+    other: dict[str, list[int]] = {
+        "command": [],
+        "sql": [],
+        "diagram": [],
+        "equation": [],
+    }
     failures: list[int] = []
 
     for index, (text, _) in enumerate(blocks, start=1):
