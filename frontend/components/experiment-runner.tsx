@@ -6,7 +6,6 @@ import { useTranslations } from 'next-intl'
 import { useState } from 'react'
 import { toast } from 'sonner'
 
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -39,7 +38,6 @@ export function ExperimentRunner({
 }) {
   const t = useTranslations('experiments')
   const tCommon = useTranslations('common')
-  const tDs = useTranslations('datasets')
   const queryClient = useQueryClient()
 
   const { data: datasets } = useQuery({
@@ -77,7 +75,7 @@ export function ExperimentRunner({
     },
     onSuccess: (result) => {
       toast.success(
-        `${result.name ?? result.id}: ${(result.accuracy * 100).toFixed(2)}% accuracy`,
+        `${result.name ?? result.id}: ${((result.accuracy ?? 0) * 100).toFixed(2)}% accuracy`,
       )
       queryClient.invalidateQueries({ queryKey: ['experiments'] })
       queryClient.invalidateQueries({ queryKey: ['experiment', result.id] })

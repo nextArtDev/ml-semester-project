@@ -17,7 +17,6 @@ import {
   YAxis,
 } from 'recharts'
 
-import { Badge } from '@/components/ui/badge'
 import {
   Card,
   CardContent,
@@ -42,14 +41,13 @@ import {
 } from '@/components/ui/table'
 import { listExperiments } from '@/lib/api'
 import type { Experiment } from '@/types/api'
-import { cn, formatMs, formatPercent } from '@/lib/utils'
+import { cn, formatPercent } from '@/lib/utils'
 
 const CHART_COLORS = ['var(--chart-1)', 'var(--chart-2)']
 
 export function CompareContent() {
   const t = useTranslations('compare')
   const tExp = useTranslations('experiments')
-  const tCommon = useTranslations('common')
 
   const { data: experiments } = useQuery({
     queryKey: ['experiments'],
@@ -107,7 +105,7 @@ export function CompareContent() {
               <SelectContent>
                 {exactOptions.map((e) => (
                   <SelectItem key={e.id} value={String(e.id)}>
-                    {e.name ?? `#${e.id}`} — {formatPercent(e.accuracy)}
+                    {e.name ?? `#${e.id}`} â€” {formatPercent(e.accuracy)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -129,7 +127,7 @@ export function CompareContent() {
               <SelectContent>
                 {approxOptions.map((e) => (
                   <SelectItem key={e.id} value={String(e.id)}>
-                    {e.name ?? `#${e.id}`} — ef={e.hnsw_ef_search}
+                    {e.name ?? `#${e.id}`} â€” ef={e.hnsw_ef_search}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -220,8 +218,8 @@ export function CompareContent() {
                 label={t('speedup')}
                 value={
                   exact.latency_avg_ms && approx.latency_avg_ms
-                    ? `${(exact.latency_avg_ms / approx.latency_avg_ms).toFixed(2)}×`
-                    : '—'
+                    ? `${(exact.latency_avg_ms / approx.latency_avg_ms).toFixed(2)}Ã—`
+                    : 'â€”'
                 }
                 tone="good"
               />

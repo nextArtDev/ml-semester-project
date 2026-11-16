@@ -1,7 +1,7 @@
 import type { Metadata } from 'next'
 import localFont from 'next/font/local'
-import { NextIntlClientProvider, getMessages } from 'next-intl'
-import { getTranslations, setRequestLocale } from 'next-intl/server'
+import { NextIntlClientProvider } from 'next-intl'
+import { getMessages, getTranslations, setRequestLocale } from 'next-intl/server'
 import { Toaster } from 'sonner'
 
 import '../globals.css'
@@ -10,14 +10,14 @@ import { ThemeProvider } from '@/providers/theme-providers'
 import { routing } from '@/i18n/routing'
 
 const interFont = localFont({
-  src: '../public/fonts/Inter-Variable.woff2',
+  src: '../../public/fonts/Inter-Variable.woff2',
   variable: '--font-sans-ui',
   display: 'swap',
   fallback: ['system-ui', 'Segoe UI', 'Helvetica Neue', 'Arial', 'sans-serif'],
 })
 
 const vazirFont = localFont({
-  src: '../public/fonts/vazirmatn.woff2',
+  src: '../../public/fonts/vazirmatn.woff2',
   variable: '--font-fa-ui',
   display: 'swap',
   fallback: ['Tahoma', 'system-ui', 'sans-serif'],

@@ -1,7 +1,7 @@
 'use client'
 
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Database, Layers, Server } from 'lucide-react'
+import { Database, Layers, Server } from 'lucide-react'
 import { useTranslations } from 'next-intl'
 
 import { getHealth } from '@/lib/api'
@@ -60,7 +60,7 @@ export function HealthBadge() {
 
       <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
         <Server className="size-3" />
-        {data?.dataset_count ?? 0} · {data?.experiment_count ?? 0}
+        {data?.dataset_count ?? 0} Â· {data?.experiment_count ?? 0}
       </span>
     </div>
   )

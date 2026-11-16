@@ -1,6 +1,8 @@
+import type { ReactNode } from 'react'
+
 import { AppHeader } from '@/components/app-header'
 
-export default function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col">
       <AppHeader />

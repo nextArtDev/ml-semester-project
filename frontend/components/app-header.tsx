@@ -1,7 +1,6 @@
 'use client'
 
 import { useLocale, useTranslations } from 'next-intl'
-import { useParams, useSearchParams } from 'next/navigation'
 import { useTransition } from 'react'
 import { Languages, Moon, Sun } from 'lucide-react'
 import { useTheme } from 'next-themes'
@@ -13,7 +12,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Link, usePathname } from '@/i18n/navigation'
+import { Link, usePathname, useRouter } from '@/i18n/navigation'
 import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
@@ -28,16 +27,15 @@ export function AppHeader() {
   const t = useTranslations('nav')
   const locale = useLocale()
   const pathname = usePathname()
-  const params = useParams()
-  const searchParams = useSearchParams()
+  const router = useRouter()
   const { setTheme, resolvedTheme } = useTheme()
   const [isPending, startTransition] = useTransition()
 
+  // The locale-aware router from next-intl swaps the locale segment while
+  // keeping the current route, so no full page reload is needed.
   const switchLocale = (next: string) => {
-    const query = searchParams.toString()
-    const suffix = query ? `?${query}` : ''
     startTransition(() => {
-      window.location.href = `/${next}${pathname}${suffix}`
+      router.replace(pathname, { locale: next })
     })
   }
 
@@ -109,12 +107,14 @@ export function AppHeader() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem
+                disabled={isPending}
                 onSelect={() => switchLocale('en')}
                 className={cn(locale === 'en' && 'bg-secondary')}
               >
                 English
               </DropdownMenuItem>
               <DropdownMenuItem
+                disabled={isPending}
                 onSelect={() => switchLocale('fa')}
                 className={cn(locale === 'fa' && 'bg-secondary')}
               >
