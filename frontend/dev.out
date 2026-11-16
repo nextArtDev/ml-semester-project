@@ -1,0 +1,25 @@
+▲ Next.js 16.3.2 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.1.159:3000
+- Environments: .env.local
+✓ Ready in 693ms
+✓ Running next.config.ts took 86ms
+- Experiments (use with caution):
+  · serverActions
+
+ GET /en 200 in 1176ms (next.js: 166ms, proxy.ts: 155ms, generate-params: 596ms, application-code: 259ms)
+ GET /en 200 in 75ms (next.js: 9ms, proxy.ts: 5ms, generate-params: 6ms, application-code: 55ms)
+ GET /fa 200 in 64ms (next.js: 7ms, proxy.ts: 4ms, generate-params: 0.0ms, application-code: 52ms)
+ GET /en/datasets 200 in 784ms (next.js: 76ms, proxy.ts: 5ms, generate-params: 615ms, application-code: 88ms)
+ GET /fa/datasets 200 in 76ms (next.js: 7ms, proxy.ts: 5ms, generate-params: 5ms, application-code: 58ms)
+ GET /en/experiments 200 in 821ms (next.js: 71ms, proxy.ts: 4ms, generate-params: 649ms, application-code: 96ms)
+ GET /en/compare 200 in 838ms (next.js: 70ms, proxy.ts: 4ms, generate-params: 626ms, application-code: 138ms)
+ GET /fa/compare 200 in 74ms (next.js: 7ms, proxy.ts: 5ms, generate-params: 5ms, application-code: 57ms)
+ GET /en/methodology 200 in 745ms (next.js: 70ms, proxy.ts: 5ms, generate-params: 600ms, application-code: 71ms)
+ GET /en 200 in 74ms (next.js: 10ms, proxy.ts: 5ms, generate-params: 6ms, application-code: 53ms)
+ GET /fa 200 in 56ms (next.js: 7ms, proxy.ts: 4ms, generate-params: 0.0ms, application-code: 45ms)
+ GET /en/datasets 200 in 69ms (next.js: 11ms, proxy.ts: 4ms, generate-params: 5ms, application-code: 49ms)
+ GET /fa/datasets 200 in 59ms (next.js: 8ms, proxy.ts: 4ms, generate-params: 0.0ms, application-code: 46ms)
+ GET /en/experiments 200 in 87ms (next.js: 12ms, proxy.ts: 4ms, generate-params: 6ms, application-code: 66ms)
+ GET /en/compare 200 in 74ms (next.js: 10ms, proxy.ts: 4ms, generate-params: 6ms, application-code: 55ms)
+ GET /en/methodology 200 in 75ms (next.js: 12ms, proxy.ts: 4ms, generate-params: 5ms, application-code: 54ms)

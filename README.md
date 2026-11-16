@@ -239,5 +239,24 @@ monotonicity of Recall@K as `ef_search` grows.
 
 ## Further reading
 
-See [`docs/`](docs/) for the architecture notes, the experiment plan and the
-API reference.
+| Document | Contents |
+| --- | --- |
+| [`docs/Thesis-KNN-PostgreSQL-Platform.docx`](docs/Thesis-KNN-PostgreSQL-Platform.docx) | The full thesis — problem statement, related work, methodology, implementation, results and discussion |
+| [`docs/Project-Guide.docx`](docs/Project-Guide.docx) | The function-by-function tour of the database, the backend and the frontend |
+| [`docs/architecture.md`](docs/architecture.md) | The design decisions and the traps they avoid |
+| [`docs/api.md`](docs/api.md) | The HTTP API reference |
+| [`docs/experiment-plan.md`](docs/experiment-plan.md) | The experimental design and the threats to validity |
+| [`docs/results/README.md`](docs/results/README.md) | The measured results and their interpretation |
+
+Both Word documents are generated from source by the scripts in
+`docs/tools/`, so they can be regenerated whenever the project changes:
+
+```powershell
+cd backend
+.venv\Scripts\python ..\docs\tools\build_thesis.py
+.venv\Scripts\python ..\docs\tools\build_guide.py
+.venv\Scripts\python ..\docs\tools\verify_snippets.py ..\docs\Project-Guide.docx
+```
+
+`verify_snippets.py` checks that every Python and TypeScript listing in the
+documents still matches the source tree, and reports any divergence.
