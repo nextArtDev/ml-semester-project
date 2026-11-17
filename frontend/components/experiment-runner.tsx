@@ -52,6 +52,7 @@ export function ExperimentRunner({
   const [hnswM, setHnswM] = useState(16)
   const [efConstruction, setEfConstruction] = useState(64)
   const [maxQueries, setMaxQueries] = useState(1000)
+  const [repetitions, setRepetitions] = useState(3)
   const [weighted, setWeighted] = useState(false)
 
   const runMutation = useMutation({
@@ -66,6 +67,7 @@ export function ExperimentRunner({
         hnsw_m: method === 'hnsw' ? hnswM : 16,
         hnsw_ef_construction: method === 'hnsw' ? efConstruction : 64,
         max_queries: maxQueries,
+        repetitions,
         weighted_voting: weighted,
         name:
           method === 'hnsw'
@@ -219,6 +221,19 @@ export function ExperimentRunner({
               value={maxQueries}
               onChange={(e) => setMaxQueries(Number(e.target.value))}
               className="w-40"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="repetitions">{t('repetitions')}</Label>
+            <Input
+              id="repetitions"
+              type="number"
+              min={1}
+              max={100}
+              value={repetitions}
+              onChange={(e) => setRepetitions(Number(e.target.value))}
+              className="w-28"
             />
           </div>
 

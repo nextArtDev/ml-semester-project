@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.services.preprocessing import PreprocessingMode
 
 
 # ---------------------------------------------------------------------------
@@ -19,6 +21,7 @@ class DatasetSummary(BaseModel):
     n_classes: int
     dimension: int
     class_labels: list[int]
+    preprocessing_mode: str
     created_at: str
 
 
@@ -29,6 +32,7 @@ class DatasetIngestRequest(BaseModel):
     train_fraction: float = Field(0.7, gt=0, lt=1)
     max_train_rows: int | None = Field(None, ge=100)
     seed: int = 42
+    preprocessing_mode: PreprocessingMode = PreprocessingMode.COVERTYPE
 
 
 class CovertypeIngestRequest(BaseModel):
@@ -37,6 +41,7 @@ class CovertypeIngestRequest(BaseModel):
     test_size: int | None = Field(5_000, ge=1, le=50_000)
     max_train_rows: int | None = Field(None, ge=100)
     seed: int = 42
+    preprocessing_mode: PreprocessingMode = PreprocessingMode.COVERTYPE
 
 
 class IngestResponse(BaseModel):
@@ -49,6 +54,7 @@ class IngestResponse(BaseModel):
     classes: list[int]
     class_distribution: list[int]
     preprocessing: dict[str, Any]
+    preprocessing_mode: str
 
 
 # ---------------------------------------------------------------------------
@@ -63,8 +69,15 @@ class ExperimentRequest(BaseModel):
     hnsw_m: int = Field(16, ge=2, le=128)
     hnsw_ef_construction: int = Field(64, ge=4, le=1000)
     max_queries: int | None = Field(2_000, ge=1, le=50_000)
+    repetitions: int = Field(1, ge=1, le=100)
     name: str | None = None
     weighted_voting: bool = False
+
+    @model_validator(mode="after")
+    def _validate_method(self) -> "ExperimentRequest":
+        if self.method == "hnsw" and self.ef_search is None:
+            raise ValueError("ef_search is required when method is 'hnsw'")
+        return self
 
 
 class ExperimentSummary(BaseModel):

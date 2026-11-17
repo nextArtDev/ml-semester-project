@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS datasets (
     dimension       INTEGER     NOT NULL DEFAULT 0,
     class_labels    JSONB       NOT NULL DEFAULT '[]'::jsonb,
     preprocessing   JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    preprocessing_mode TEXT     NOT NULL DEFAULT 'covertype',
     is_seeded       BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS hnsw_indexes (
     m               INTEGER     NOT NULL,
     ef_construction INTEGER     NOT NULL,
     build_ms        DOUBLE PRECISION,
+    size_bytes      BIGINT,
     built_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -76,6 +78,8 @@ CREATE TABLE IF NOT EXISTS experiments (
     train_size          INTEGER     NOT NULL DEFAULT 0,
     test_size           INTEGER     NOT NULL DEFAULT 0,
     index_build_ms      DOUBLE PRECISION,
+    index_size_bytes    BIGINT,
+    repetitions         INTEGER     NOT NULL DEFAULT 1,
     recall_at_k         DOUBLE PRECISION,
     accuracy            DOUBLE PRECISION,
     macro_f1            DOUBLE PRECISION,
@@ -85,8 +89,12 @@ CREATE TABLE IF NOT EXISTS experiments (
     latency_p50_ms      DOUBLE PRECISION,
     latency_p95_ms      DOUBLE PRECISION,
     latency_p99_ms      DOUBLE PRECISION,
+    latency_min_ms      DOUBLE PRECISION,
+    latency_max_ms      DOUBLE PRECISION,
     total_runtime_s     DOUBLE PRECISION,
+    api_overhead_s      DOUBLE PRECISION,
     used_index_scan     BOOLEAN,
+    environment         JSONB       NOT NULL DEFAULT '{}'::jsonb,
     confusion_matrix    JSONB       NOT NULL DEFAULT '{}'::jsonb,
     per_class_metrics   JSONB       NOT NULL DEFAULT '[]'::jsonb,
     config              JSONB       NOT NULL DEFAULT '{}'::jsonb,
@@ -116,6 +124,29 @@ CREATE INDEX IF NOT EXISTS query_latencies_experiment_idx
 """
 
 
+# ---------------------------------------------------------------------------
+# Forward migrations
+#
+# These bring a database created by an earlier version of the schema up to
+# date. They are idempotent, so running them on a current database is a
+# no-op.
+# ---------------------------------------------------------------------------
+MIGRATION_SQL: list[str] = [
+    "ALTER TABLE datasets "
+    "ADD COLUMN IF NOT EXISTS preprocessing_mode TEXT NOT NULL DEFAULT 'covertype'",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS index_size_bytes BIGINT",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS repetitions INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS latency_min_ms DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS latency_max_ms DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS api_overhead_s DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS environment JSONB NOT NULL DEFAULT '{}'::jsonb",
+    "ALTER TABLE hnsw_indexes ADD COLUMN IF NOT EXISTS size_bytes BIGINT",
+    # IVFFlat is out of scope for this project, so the leftover column from
+    # an earlier schema is removed rather than left to mislead.
+    "ALTER TABLE experiments DROP COLUMN IF EXISTS hnsw_lists",
+]
+
+
 def migration_statements() -> list[str]:
     """Split the schema blob into individual statements."""
     statements: list[str] = []
@@ -125,4 +156,5 @@ def migration_statements() -> list[str]:
         ).strip()
         if stmt:
             statements.append(stmt)
+    statements.extend(MIGRATION_SQL)
     return statements

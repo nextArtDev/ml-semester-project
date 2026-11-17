@@ -18,8 +18,11 @@ from app.core.database import execute, fetch_all, fetch_one
 from app.services import datasets as ds
 from app.services import vector_store as vs
 from app.services.preprocessing import (
+    DataValidationError,
+    PreprocessingMode,
     fit_preprocessor,
     transform,
+    validate_dataset,
     vector_literal,
 )
 
@@ -28,22 +31,44 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 
 def _ingest_frame(df, name: str, source: str, target_column: str, test_size: int | None,
-                  max_train_rows: int | None, seed: int, original_name: str | None = None) -> IngestResponse:
+                  max_train_rows: int | None, seed: int, original_name: str | None = None,
+                  preprocessing_mode: PreprocessingMode = PreprocessingMode.COVERTYPE) -> IngestResponse:
     """Shared ingestion pipeline for uploaded and seeded datasets."""
     if target_column not in df.columns:
         raise HTTPException(400, f"Target column '{target_column}' not found in the dataset")
 
-    train_df, test_df = ds.stratified_split(df, target_column, test_size=test_size, seed=seed)
+    # Reject unusable datasets before doing any work.
+    problems = validate_dataset(df, target_column)
+    if problems:
+        raise HTTPException(400, "Invalid dataset: " + "; ".join(problems))
+
+    try:
+        train_df, test_df = ds.stratified_split(
+            df, target_column, test_size=test_size, seed=seed
+        )
+    except ValueError as exc:
+        raise HTTPException(400, f"Cannot split the dataset: {exc}") from exc
+
     train_df = ds.sample_training_rows(train_df, target_column, max_train_rows, seed=seed)
 
     # Preprocessing statistics come exclusively from the training split.
-    state, scaler = fit_preprocessor(train_df, target_column)
-    train_matrix, train_labels = transform(train_df, state, scaler)
-    test_matrix, test_labels = transform(test_df, state, scaler)
+    try:
+        state, preprocessor = fit_preprocessor(train_df, target_column, preprocessing_mode)
+    except DataValidationError as exc:
+        raise HTTPException(400, f"Invalid dataset: {exc}") from exc
+    train_matrix, train_labels = transform(train_df, state, preprocessor)
+    test_matrix, test_labels = transform(test_df, state, preprocessor)
 
     dimension = int(train_matrix.shape[1])
     if dimension == 0:
         raise HTTPException(400, "No feature columns were detected")
+
+    if train_matrix.shape[1] != test_matrix.shape[1]:
+        raise HTTPException(
+            400,
+            "The training and test splits produced different feature dimensions "
+            f"({train_matrix.shape[1]} vs {test_matrix.shape[1]}).",
+        )
 
     train_vecs = vector_literal(train_matrix)
     test_vecs = vector_literal(test_matrix)
@@ -52,8 +77,8 @@ def _ingest_frame(df, name: str, source: str, target_column: str, test_size: int
         """
         INSERT INTO datasets
             (name, source, original_name, n_rows, n_features, n_classes, dimension,
-             class_labels, preprocessing, is_seeded)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+             class_labels, preprocessing, is_seeded, preprocessing_mode)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
         RETURNING id
         """,
         (
@@ -61,12 +86,13 @@ def _ingest_frame(df, name: str, source: str, target_column: str, test_size: int
             source,
             original_name,
             len(df),
-            len(state.feature_columns),
+            len(state.output_columns),
             len(state.class_labels),
             dimension,
             json.dumps(state.class_labels),
             state.to_json(),
             source == "covertype",
+            preprocessing_mode.value,
         ),
     )
 
@@ -100,6 +126,7 @@ def _ingest_frame(df, name: str, source: str, target_column: str, test_size: int
         classes=state.class_labels,
         class_distribution=distribution,
         preprocessing=state.to_dict(),
+        preprocessing_mode=state.mode,
     )
 
 
@@ -180,6 +207,7 @@ async def upload_dataset(
     test_size: int | None = Form(None),
     max_train_rows: int | None = Form(None),
     seed: int = Form(42),
+    preprocessing_mode: PreprocessingMode = Form(PreprocessingMode.COVERTYPE),
 ) -> IngestResponse:
     raw = await file.read()
     if not raw:
@@ -192,7 +220,7 @@ async def upload_dataset(
     return _ingest_frame(
         df, name=name, source="upload", target_column=target_column,
         test_size=test_size, max_train_rows=max_train_rows, seed=seed,
-        original_name=file.filename,
+        original_name=file.filename, preprocessing_mode=preprocessing_mode,
     )
 
 
@@ -212,6 +240,7 @@ def ingest_covertype(request: CovertypeIngestRequest) -> IngestResponse:
         test_size=request.test_size,
         max_train_rows=request.max_train_rows,
         seed=request.seed,
+        preprocessing_mode=request.preprocessing_mode,
     )
 
 

@@ -110,20 +110,21 @@ class TestLatencyStats:
 class TestPreprocessState:
     def test_roundtrip_json(self) -> None:
         state = PreprocessState(
-            feature_columns=["a", "b"],
             target_column="label",
             numeric_columns=["a"],
+            binary_columns=[],
             categorical_columns=["b"],
-            category_mappings={"b": {"x": 0, "y": 1}},
-            scaler_mean=[1.0, 2.0],
-            scaler_scale=[1.0, 0.5],
+            categorical_categories={"b": ["x", "y"]},
+            numeric_scaler_mean=[1.0],
+            numeric_scaler_scale=[0.5],
+            output_columns=["a", "b=x", "b=y"],
             class_labels=[1, 2],
             label_to_index={1: 0, 2: 1},
         )
         restored = PreprocessState.from_json(state.to_json())
-        assert restored.feature_columns == state.feature_columns
+        assert restored.output_columns == state.output_columns
         assert restored.label_to_index == state.label_to_index
-        assert restored.scaler_scale == state.scaler_scale
+        assert restored.numeric_scaler_scale == state.numeric_scaler_scale
 
 
 class TestDistanceMetric:

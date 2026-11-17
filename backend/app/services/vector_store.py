@@ -201,21 +201,36 @@ def create_hnsw_index(
                 )
             )
             elapsed = (time.perf_counter() - start) * 1000
+            size_bytes = index_size_bytes(dataset_id)
             cur.execute(
                 sql.SQL(
                     "INSERT INTO hnsw_indexes "
-                    "(dataset_id, distance_metric, m, ef_construction, build_ms, built_at) "
-                    "VALUES (%s, %s, %s, %s, %s, now()) "
+                    "(dataset_id, distance_metric, m, ef_construction, build_ms, size_bytes, built_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, now()) "
                     "ON CONFLICT (dataset_id) DO UPDATE SET "
                     "distance_metric = EXCLUDED.distance_metric, "
                     "m = EXCLUDED.m, "
                     "ef_construction = EXCLUDED.ef_construction, "
                     "build_ms = EXCLUDED.build_ms, "
+                    "size_bytes = EXCLUDED.size_bytes, "
                     "built_at = now()"
                 ),
-                (dataset_id, metric.value, int(m), int(ef_construction), elapsed),
+                (
+                    dataset_id,
+                    metric.value,
+                    int(m),
+                    int(ef_construction),
+                    elapsed,
+                    size_bytes,
+                ),
             )
-    logger.info("HNSW index built in %.1f ms (m=%s, ef_construction=%s)", elapsed, m, ef_construction)
+    logger.info(
+        "HNSW index built in %.1f ms (m=%s, ef_construction=%s, size=%s bytes)",
+        elapsed,
+        m,
+        ef_construction,
+        size_bytes,
+    )
     return elapsed
 
 
@@ -248,10 +263,43 @@ def analyze(dataset_id: int) -> None:
             cur.execute(sql.SQL("ANALYZE {t}").format(t=sql.Identifier(test_table(dataset_id))))
 
 
-def plan_uses_index_scan(plan_text: str) -> bool:
-    """Detect whether the planner chose an HNSW index scan."""
+def index_size_bytes(dataset_id: int) -> int | None:
+    """The on-disk size of the HNSW index, in bytes.
+
+    Returns ``None`` when no index exists. The size is read from
+    ``pg_relation_size`` so that it reflects the physical footprint rather
+    than an estimate.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_relation_size(%s) AS size", (index_name(dataset_id),)
+            )
+            row = cur.fetchone()
+            if row is None or row["size"] is None:
+                return None
+            return int(row["size"])
+
+
+def plan_uses_index_scan(plan_text: str, index_name_: str | None = None) -> bool:
+    """Detect whether the planner chose an HNSW index scan.
+
+    When ``index_name_`` is given, the plan must reference that specific
+    index. This matters because a btree index scan would otherwise satisfy
+    the generic check and produce a false positive.
+    """
     lowered = plan_text.lower()
-    return "index scan" in lowered and ("hnsw" in lowered or "index searches" in lowered)
+    if "index scan" not in lowered:
+        return False
+    if index_name_ is not None:
+        return index_name_.lower() in lowered
+    return "hnsw" in lowered or "index searches" in lowered
+
+
+def plan_uses_sequential_scan(plan_text: str) -> bool:
+    """Detect whether the planner fell back to an exhaustive sequential scan."""
+    lowered = plan_text.lower()
+    return "seq scan" in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +318,8 @@ class RetrievalResult:
     latency_ms: float
     used_index_scan: bool
     plan: str
+    used_sequential_scan: bool = False
+    applied_ef_search: int | None = None
 
 
 def _distance_expr(metric: DistanceMetric, use_operator: bool) -> sql.Composable:
@@ -301,7 +351,7 @@ def _explain_sql(
 ) -> sql.Composed:
     dist = _distance_expr(metric, use_operator)
     return sql.SQL(
-        "EXPLAIN (ANALYZE, FORMAT TEXT) "
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) "
         "SELECT id, label, {dist} AS distance "
         "FROM {t} "
         "ORDER BY {dist} "
@@ -318,6 +368,7 @@ def retrieve(
     ef_search: int | None = None,
     use_operator: bool = True,
     warmup: bool = True,
+    verify_plan: bool = True,
 ) -> RetrievalResult:
     """Run a single nearest-neighbour query and time it.
 
@@ -325,16 +376,25 @@ def retrieve(
     satisfied by an index and therefore guarantees an exhaustive scan.
     ``method='hnsw'`` uses the *operator* form so the planner can choose an
     HNSW index scan.
+
+    The search-effort parameter is set at *session* level rather than with
+    ``SET LOCAL``, because the connection pool runs in autocommit mode where
+    ``SET LOCAL`` is silently discarded. The value is read back from the
+    server to confirm that it was actually applied, and it is restored in a
+    ``finally`` block so that a pooled connection never leaks the setting
+    into a later request.
     """
     use_op = method == "hnsw" and use_operator
+    applied_ef: int | None = None
 
     with connection() as conn:
         with conn.cursor() as cur:
-            # The pool runs in autocommit mode, where SET LOCAL is a no-op,
-            # so the search-effort parameter is set at session level and
-            # explicitly restored afterwards.
             if ef_search is not None:
                 cur.execute(f"SET hnsw.ef_search = {int(ef_search)}")
+                # Confirm the server actually took the value.
+                cur.execute("SHOW hnsw.ef_search")
+                row = cur.fetchone()
+                applied_ef = int(row["hnsw.ef_search"]) if row else None
             try:
                 stmt = _query_sql(dataset_id, metric, k, use_op)
                 params: tuple = (query_vector, query_vector)
@@ -352,10 +412,12 @@ def retrieve(
 
                 plan = ""
                 used_index = False
-                if method == "hnsw":
+                used_seq_scan = False
+                if verify_plan:
                     cur.execute(_explain_sql(dataset_id, metric, k, use_op), params)
                     plan = "\n".join(r["QUERY PLAN"] for r in cur.fetchall())
-                    used_index = plan_uses_index_scan(plan)
+                    used_index = plan_uses_index_scan(plan, index_name(dataset_id))
+                    used_seq_scan = plan_uses_sequential_scan(plan)
             finally:
                 if ef_search is not None:
                     cur.execute("RESET hnsw.ef_search")
@@ -373,7 +435,41 @@ def retrieve(
         latency_ms=elapsed_ms,
         used_index_scan=used_index,
         plan=plan,
+        used_sequential_scan=used_seq_scan,
+        applied_ef_search=applied_ef,
     )
+
+
+@dataclass
+class BatchResult:
+    """The outcome of a timed query sweep.
+
+    ``results`` holds one entry per query, taken from the final repetition,
+    and carries the neighbour sets used for the classification metrics.
+    ``latencies`` holds **every** measured sample across all repetitions, so
+    that the reported percentiles are computed over the full sample rather
+    than over a per-query average.
+    """
+
+    results: list[RetrievalResult]
+    latencies: list[float]
+    repetitions: int
+    warmup_queries: int
+
+    @property
+    def used_index_scan(self) -> bool:
+        return any(r.used_index_scan for r in self.results)
+
+    @property
+    def used_sequential_scan(self) -> bool:
+        return any(r.used_sequential_scan for r in self.results)
+
+    @property
+    def applied_ef_search(self) -> int | None:
+        for result in self.results:
+            if result.applied_ef_search is not None:
+                return result.applied_ef_search
+        return None
 
 
 def retrieve_batch(
@@ -383,22 +479,47 @@ def retrieve_batch(
     dataset_id: int,
     method: str = "exact",
     ef_search: int | None = None,
-) -> list[RetrievalResult]:
-    """Run one query per vector and return the per-query results."""
-    results: list[RetrievalResult] = []
-    for i, vec in enumerate(query_vectors):
-        results.append(
-            retrieve(
-                query_vector=vec,
-                k=k,
-                metric=metric,
-                dataset_id=dataset_id,
-                method=method,
-                ef_search=ef_search,
-                warmup=(i == 0),
+    repetitions: int = 1,
+) -> BatchResult:
+    """Run the query set and return the measured results.
+
+    ``repetitions`` repeats the whole sweep. The neighbour sets of the final
+    repetition are returned (and used for the classification metrics), while
+    every repetition contributes its latency to the timing sample. This keeps
+    the retrieval quality and the timing statistics consistent while reducing
+    the noise in the latter.
+
+    A single warm-up query is executed before the first measurement and
+    discarded.
+    """
+    if repetitions < 1:
+        raise ValueError(f"repetitions must be at least 1 (got {repetitions})")
+
+    per_repetition: list[list[RetrievalResult]] = []
+    for repetition in range(repetitions):
+        current: list[RetrievalResult] = []
+        for i, vec in enumerate(query_vectors):
+            current.append(
+                retrieve(
+                    query_vector=vec,
+                    k=k,
+                    metric=metric,
+                    dataset_id=dataset_id,
+                    method=method,
+                    ef_search=ef_search,
+                    warmup=(repetition == 0 and i == 0),
+                )
             )
-        )
-    return results
+        per_repetition.append(current)
+
+    latencies = [r.latency_ms for batch in per_repetition for r in batch]
+
+    return BatchResult(
+        results=per_repetition[-1],
+        latencies=latencies,
+        repetitions=repetitions,
+        warmup_queries=1 if query_vectors else 0,
+    )
 
 
 def ground_truth_ids(

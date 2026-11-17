@@ -2,6 +2,7 @@
 
 export type DistanceMetric = 'l2' | 'cosine' | 'l1'
 export type RetrievalMethod = 'exact' | 'hnsw'
+export type PreprocessingMode = 'covertype' | 'standardize_all'
 
 export interface DatasetSummary {
   id: number
@@ -12,6 +13,7 @@ export interface DatasetSummary {
   n_classes: number
   dimension: number
   class_labels: number[]
+  preprocessing_mode: PreprocessingMode
   created_at: string
 }
 
@@ -25,6 +27,7 @@ export interface IngestResponse {
   classes: number[]
   class_distribution: number[]
   preprocessing: Record<string, unknown>
+  preprocessing_mode: PreprocessingMode
 }
 
 export interface PerClassMetric {
@@ -47,17 +50,23 @@ export interface Experiment {
   train_size: number
   test_size: number
   index_build_ms: number | null
+  index_size_bytes: number | null
+  repetitions: number
   recall_at_k: number | null
   accuracy: number | null
-  macro_f1: number | null
   precision_macro: number | null
   recall_macro: number | null
+  macro_f1: number | null
   latency_avg_ms: number | null
   latency_p50_ms: number | null
   latency_p95_ms: number | null
   latency_p99_ms: number | null
+  latency_min_ms: number | null
+  latency_max_ms: number | null
   total_runtime_s: number | null
+  api_overhead_s: number | null
   used_index_scan: boolean | null
+  environment: Record<string, unknown>
   confusion_matrix: number[][]
   per_class_metrics: PerClassMetric[]
   status: string
@@ -74,6 +83,7 @@ export interface ExperimentRequest {
   hnsw_m?: number
   hnsw_ef_construction?: number
   max_queries?: number | null
+  repetitions?: number
   name?: string | null
   weighted_voting?: boolean
 }
@@ -83,6 +93,8 @@ export interface ExperimentComparison {
   approximate: Experiment
   deltas: {
     accuracy: number | null
+    precision_macro: number | null
+    recall_macro: number | null
     macro_f1: number | null
     recall_at_k: number | null
     latency_avg_ms: number | null

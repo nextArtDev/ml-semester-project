@@ -1,4 +1,4 @@
-"""Tests for the dataset splitting helpers."""
+"""Tests for dataset acquisition and splitting helpers."""
 
 from __future__ import annotations
 
@@ -27,30 +27,83 @@ def frame() -> pd.DataFrame:
 
 
 class TestStratifiedSplit:
-    def test_split_sizes(self, frame: pd.DataFrame) -> None:
-        train, test = stratified_split(frame, "label", test_size=200)
-        assert len(train) == 800
+    def test_train_fraction_is_honoured(self, frame: pd.DataFrame) -> None:
+        for fraction in (0.5, 0.7, 0.9):
+            train, test = stratified_split(frame, "label", train_fraction=fraction)
+            assert len(train) == int(round(1000 * fraction))
+            assert len(test) == 1000 - len(train)
+
+    def test_train_fraction_default_is_0_7(self, frame: pd.DataFrame) -> None:
+        train, test = stratified_split(frame, "label")
+        assert len(train) == 700
+        assert len(test) == 300
+
+    def test_explicit_test_size_takes_precedence(self, frame: pd.DataFrame) -> None:
+        train, test = stratified_split(
+            frame, "label", test_size=200, train_fraction=0.5
+        )
         assert len(test) == 200
+        assert len(train) == 800
 
     def test_class_distribution_is_preserved(self, frame: pd.DataFrame) -> None:
         train, test = stratified_split(frame, "label", test_size=300)
         for label in frame["label"].unique():
-            total = (frame["label"] == label).sum()
-            in_test = (test["label"] == label).sum()
+            total = int((frame["label"] == label).sum())
+            in_test = int((test["label"] == label).sum())
             assert in_test / total == pytest.approx(0.3, abs=0.02)
 
-    def test_is_deterministic(self, frame: pd.DataFrame) -> None:
-        a1, b1 = stratified_split(frame, "label", test_size=100, seed=7)
-        a2, b2 = stratified_split(frame, "label", test_size=100, seed=7)
+    @pytest.mark.parametrize("fraction", [0.0, 1.0, -0.1, 1.2])
+    def test_invalid_train_fraction_rejected(self, frame: pd.DataFrame, fraction: float) -> None:
+        with pytest.raises(ValueError, match="train_fraction"):
+            stratified_split(frame, "label", train_fraction=fraction)
+
+    def test_invalid_test_size_rejected(self, frame: pd.DataFrame) -> None:
+        with pytest.raises(ValueError, match="test_size"):
+            stratified_split(frame, "label", test_size=0)
+
+    @pytest.mark.parametrize("seed", [0, 42, 1234])
+    def test_seed_is_reproducible(self, frame: pd.DataFrame, seed: int) -> None:
+        a1, b1 = stratified_split(frame, "label", test_size=100, seed=seed)
+        a2, b2 = stratified_split(frame, "label", test_size=100, seed=seed)
         pd.testing.assert_frame_equal(a1, a2)
         pd.testing.assert_frame_equal(b1, b2)
 
+    def test_different_seeds_give_different_splits(self, frame: pd.DataFrame) -> None:
+        a1, b1 = stratified_split(frame, "label", test_size=100, seed=1)
+        a2, b2 = stratified_split(frame, "label", test_size=100, seed=2)
+        assert not b1.equals(b2)
+
     def test_no_row_leakage_between_splits(self, frame: pd.DataFrame) -> None:
-        """The same observation must never appear in both splits."""
         train, test = stratified_split(frame, "label", test_size=100)
         train_rows = {tuple(row) for row in train.to_numpy().tolist()}
         test_rows = {tuple(row) for row in test.to_numpy().tolist()}
         assert not (train_rows & test_rows)
+
+    def test_missing_target_column_rejected(self, frame: pd.DataFrame) -> None:
+        with pytest.raises(ValueError, match="not found"):
+            stratified_split(frame, "missing_target")
+
+    def test_rare_classes_stay_in_training(self) -> None:
+        df = pd.DataFrame(
+            {
+                "x": range(12),
+                "label": [0] * 10 + [1, 2],
+            }
+        )
+        train, test = stratified_split(df, "label", test_size=3, seed=0)
+        # Classes 1 and 2 have a single member and cannot be split, so they
+        # must remain entirely in the training split.
+        assert 1 in train["label"].values
+        assert 2 in train["label"].values
+        assert 1 not in test["label"].values
+        assert 2 not in test["label"].values
+        assert len(test) == 3
+
+    def test_two_rows_produces_one_test_row(self) -> None:
+        df = pd.DataFrame({"x": [1, 2], "label": [0, 1]})
+        train, test = stratified_split(df, "label", train_fraction=0.5)
+        assert len(train) == 1
+        assert len(test) == 1
 
 
 class TestSampleTrainingRows:
@@ -60,7 +113,7 @@ class TestSampleTrainingRows:
 
     def test_reduces_to_requested_size(self, frame: pd.DataFrame) -> None:
         out = sample_training_rows(frame, "label", max_rows=200)
-        assert len(out) <= 220  # rounding per class may overshoot slightly
+        assert len(out) <= 220
         assert len(out) < len(frame)
 
     def test_keeps_every_class(self, frame: pd.DataFrame) -> None:
@@ -70,18 +123,23 @@ class TestSampleTrainingRows:
     def test_preserves_relative_proportions(self, frame: pd.DataFrame) -> None:
         out = sample_training_rows(frame, "label", max_rows=400)
         for label in frame["label"].unique():
-            original = (frame["label"] == label).mean()
-            sampled = (out["label"] == label).mean()
-            assert sampled == pytest.approx(original, abs=0.05)
+            assert (out["label"] == label).mean() == pytest.approx(
+                (frame["label"] == label).mean(), abs=0.05
+            )
+
+    def test_sampling_is_reproducible(self, frame: pd.DataFrame) -> None:
+        a = sample_training_rows(frame, "label", max_rows=200, seed=7)
+        b = sample_training_rows(frame, "label", max_rows=200, seed=7)
+        pd.testing.assert_frame_equal(a, b)
 
 
 class TestCovertypeColumns:
     def test_column_layout_matches_the_uci_file(self) -> None:
-        # 10 continuous + 4 wilderness + 40 soil + 1 label = 55 columns.
         assert len(COVERTYPE_COLUMNS) == 55
         assert COVERTYPE_COLUMNS[-1] == "label"
         assert sum(c.startswith("Soil_Type_") for c in COVERTYPE_COLUMNS) == 40
         assert sum(c.startswith("Wilderness_Area_") for c in COVERTYPE_COLUMNS) == 4
+        assert len(COVERTYPE_COLUMNS[:10]) == 10
 
 
 class TestClassDistribution:

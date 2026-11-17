@@ -65,6 +65,7 @@ export const ingestCovertype = (body: {
   test_size?: number | null
   max_train_rows?: number | null
   seed?: number
+  preprocessing_mode?: 'covertype' | 'standardize_all'
 }) =>
   request<IngestResponse>('/datasets/covertype', {
     method: 'POST',
