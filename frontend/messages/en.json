@@ -85,7 +85,10 @@
     "classDistribution": "Class distribution",
     "trainRows": "Training rows",
     "testRows": "Test rows",
-    "dimensionMismatch": "All rows must have the same number of features."
+    "dimensionMismatch": "All rows must have the same number of features.",
+    "preprocessingMode": "Preprocessing",
+    "preprocessingCovertype": "Scale continuous features, keep binary indicators as 0/1",
+    "preprocessingAll": "Standardize all features"
   },
   "experiments": {
     "title": "Experiments",
@@ -105,6 +108,13 @@
     "hnswM": "hnsw.m",
     "hnswEfConstruction": "hnsw.ef_construction",
     "maxQueries": "Queries to measure",
+    "repetitions": "Timing repetitions",
+    "repetitionsHint": "The whole query set is repeated this many times; every sample is recorded.",
+    "indexSize": "Index size",
+    "apiOverhead": "Non-query time",
+    "preprocessingMode": "Preprocessing",
+    "preprocessingCovertype": "Scale 10 continuous features, keep 44 binary indicators as 0/1",
+    "preprocessingAll": "Standardize all features including binary indicators",
     "weightedVoting": "Distance-weighted voting",
     "runExact": "Run exact baseline",
     "runHnsw": "Run HNSW experiment",

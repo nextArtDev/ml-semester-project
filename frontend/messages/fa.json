@@ -85,7 +85,10 @@
     "classDistribution": "توزیع کلاس‌ها",
     "trainRows": "سطرهای آموزش",
     "testRows": "سطرهای آزمون",
-    "dimensionMismatch": "همه سطرها باید تعداد ویژگی یکسانی داشته باشند."
+    "dimensionMismatch": "همه سطرها باید تعداد ویژگی یکسانی داشته باشند.",
+    "preprocessingMode": "پیشپردازش",
+    "preprocessingCovertype": "استانداردسازی ویژگیهای پیوسته، حفظ شاخصهای دودویی",
+    "preprocessingAll": "استانداردسازی تمام ویژگیها"
   },
   "experiments": {
     "title": "آزمایش‌ها",
@@ -130,7 +133,14 @@
     "confusionMatrix": "ماتریس درهم‌ریختگی",
     "trueLabel": "واقعی",
     "predLabel": "پیش‌بینی‌شده",
-    "support": "تعداد"
+    "support": "تعداد",
+    "repetitions": "تکرارهای زمانسنجی",
+    "repetitionsHint": "مجموعه پرسوجوها این تعداد بار تکرار میشود و تمام نمونهها ثبت میشوند.",
+    "indexSize": "اندازه ایندکس",
+    "apiOverhead": "زمان غیرپرسوجو",
+    "preprocessingMode": "پیشپردازش",
+    "preprocessingCovertype": "استانداردسازی ۱۰ ویژگی پیوسته و نگه داشتن ۴۴ شاخص دودویی به صورت ۰/۱",
+    "preprocessingAll": "استانداردسازی تمام ویژگیها شامل شاخصهای دودویی"
   },
   "compare": {
     "title": "مقایسه",
