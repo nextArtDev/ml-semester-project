@@ -74,17 +74,33 @@ CREATE TABLE IF NOT EXISTS experiments (
     distance_metric     TEXT        NOT NULL CHECK (distance_metric IN ('l2', 'cosine', 'l1')),
     hnsw_ef_search      INTEGER,
     hnsw_m              INTEGER,
-    hnsw_lists          INTEGER,
+    hnsw_ef_construction INTEGER,
     train_size          INTEGER     NOT NULL DEFAULT 0,
     test_size           INTEGER     NOT NULL DEFAULT 0,
+    unique_queries      INTEGER     NOT NULL DEFAULT 0,
+    total_test_pool     INTEGER     NOT NULL DEFAULT 0,
     index_build_ms      DOUBLE PRECISION,
+    index_created_ms    DOUBLE PRECISION,
+    index_reused        BOOLEAN,
+    index_reused_build_ms DOUBLE PRECISION,
     index_size_bytes    BIGINT,
     repetitions         INTEGER     NOT NULL DEFAULT 1,
     recall_at_k         DOUBLE PRECISION,
+    tie_aware_recall_at_k DOUBLE PRECISION,
+    tied_queries        INTEGER,
+    max_tied_candidates INTEGER,
     accuracy            DOUBLE PRECISION,
     macro_f1            DOUBLE PRECISION,
     precision_macro     DOUBLE PRECISION,
     recall_macro        DOUBLE PRECISION,
+    accuracy_std        DOUBLE PRECISION,
+    macro_f1_std        DOUBLE PRECISION,
+    recall_at_k_std     DOUBLE PRECISION,
+    tie_aware_recall_at_k_std DOUBLE PRECISION,
+    dataset_fingerprint TEXT,
+    seed                INTEGER,
+    tie_tolerance_rel   DOUBLE PRECISION,
+    tie_tolerance_abs   DOUBLE PRECISION,
     latency_avg_ms      DOUBLE PRECISION,
     latency_p50_ms      DOUBLE PRECISION,
     latency_p95_ms      DOUBLE PRECISION,
@@ -114,6 +130,7 @@ CREATE INDEX IF NOT EXISTS experiments_dataset_idx
 CREATE TABLE IF NOT EXISTS query_latencies (
     id            BIGSERIAL PRIMARY KEY,
     experiment_id BIGINT      NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+    repetition    INTEGER     NOT NULL DEFAULT 1,
     query_index   INTEGER     NOT NULL,
     latency_ms    DOUBLE PRECISION NOT NULL,
     retrieved_ids JSONB       NOT NULL DEFAULT '[]'::jsonb
@@ -121,6 +138,36 @@ CREATE TABLE IF NOT EXISTS query_latencies (
 
 CREATE INDEX IF NOT EXISTS query_latencies_experiment_idx
     ON query_latencies (experiment_id);
+
+-- ---------------------------------------------------------------------------
+-- Per-repetition results
+--
+-- One row per (experiment, repetition). A repetition is a complete timed pass
+-- over the whole query set, so its recall/accuracy describe that pass rather
+-- than an average over all latency samples. These rows are what make the
+-- between-repetition spread measurable.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS experiment_repetitions (
+    id                   BIGSERIAL PRIMARY KEY,
+    experiment_id        BIGINT      NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+    repetition           INTEGER     NOT NULL,
+    unique_queries       INTEGER     NOT NULL,
+    samples              INTEGER     NOT NULL,
+    latency_avg_ms       DOUBLE PRECISION,
+    latency_p50_ms       DOUBLE PRECISION,
+    latency_p95_ms       DOUBLE PRECISION,
+    latency_p99_ms       DOUBLE PRECISION,
+    recall_at_k          DOUBLE PRECISION,
+    tie_aware_recall_at_k DOUBLE PRECISION,
+    accuracy             DOUBLE PRECISION,
+    precision_macro      DOUBLE PRECISION,
+    recall_macro         DOUBLE PRECISION,
+    macro_f1             DOUBLE PRECISION,
+    UNIQUE (experiment_id, repetition)
+);
+
+CREATE INDEX IF NOT EXISTS experiment_repetitions_experiment_idx
+    ON experiment_repetitions (experiment_id);
 """
 
 
@@ -141,6 +188,25 @@ MIGRATION_SQL: list[str] = [
     "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS api_overhead_s DOUBLE PRECISION",
     "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS environment JSONB NOT NULL DEFAULT '{}'::jsonb",
     "ALTER TABLE hnsw_indexes ADD COLUMN IF NOT EXISTS size_bytes BIGINT",
+    # --- research-correctness columns (repetition-level and tie-aware) -----
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS hnsw_ef_construction INTEGER",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS index_created_ms DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS index_reused BOOLEAN",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS index_reused_build_ms DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS tie_aware_recall_at_k DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS unique_queries INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS total_test_pool INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS dataset_fingerprint TEXT",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS seed INTEGER",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS tie_tolerance_rel DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS tie_tolerance_abs DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS tied_queries INTEGER",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS max_tied_candidates INTEGER",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS accuracy_std DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS macro_f1_std DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS recall_at_k_std DOUBLE PRECISION",
+    "ALTER TABLE experiments ADD COLUMN IF NOT EXISTS tie_aware_recall_at_k_std DOUBLE PRECISION",
+    "ALTER TABLE query_latencies ADD COLUMN IF NOT EXISTS repetition INTEGER NOT NULL DEFAULT 1",
     # IVFFlat is out of scope for this project, so the leftover column from
     # an earlier schema is removed rather than left to mislead.
     "ALTER TABLE experiments DROP COLUMN IF EXISTS hnsw_lists",

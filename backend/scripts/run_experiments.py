@@ -41,9 +41,11 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.database import execute, fetch_one  # noqa: E402
 from app.services import vector_store as vs  # noqa: E402
+from app.services.classification import repetition_summary  # noqa: E402
 from app.services.experiments import (  # noqa: E402
     ExperimentConfig,
     get_experiment,
+    get_repetitions,
     run_experiment,
 )
 from app.services.metrics import DistanceMetric  # noqa: E402
@@ -52,6 +54,8 @@ FIELDS = [
     "dataset_id",
     "train_size",
     "test_size",
+    "unique_queries",
+    "total_test_pool",
     "retrieval_method",
     "k",
     "distance_metric",
@@ -62,10 +66,15 @@ FIELDS = [
     "measured_queries",
     "preprocessing_mode",
     "recall_at_k",
+    "tie_aware_recall_at_k",
     "accuracy",
     "precision_macro",
     "recall_macro",
     "macro_f1",
+    "accuracy_std",
+    "macro_f1_std",
+    "recall_at_k_std",
+    "tie_aware_recall_at_k_std",
     "latency_avg_ms",
     "latency_p50_ms",
     "latency_p95_ms",
@@ -73,7 +82,14 @@ FIELDS = [
     "latency_min_ms",
     "latency_max_ms",
     "index_build_ms",
+    "index_created_ms",
+    "index_reused",
+    "index_reused_build_ms",
     "index_size_bytes",
+    "tied_queries",
+    "max_tied_candidates",
+    "dataset_fingerprint",
+    "seed",
     "speedup_p50",
     "speedup_avg",
     "used_index_scan",
@@ -87,6 +103,44 @@ FIELDS = [
     "env_cpu_cores",
     "env_postgresql",
     "env_pgvector",
+]
+
+REPETITION_FIELDS = [
+    "experiment_id",
+    "dataset_id",
+    "train_size",
+    "retrieval_method",
+    "ef_search",
+    "repetition",
+    "unique_queries",
+    "samples",
+    "latency_mean_ms",
+    "latency_p50_ms",
+    "latency_p95_ms",
+    "latency_p99_ms",
+    "recall_at_k",
+    "tie_aware_recall_at_k",
+    "accuracy",
+    "precision_macro",
+    "recall_macro",
+    "macro_f1",
+]
+
+SUMMARY_FIELDS = [
+    "experiment_id",
+    "dataset_id",
+    "train_size",
+    "retrieval_method",
+    "ef_search",
+    "repetitions",
+    "metric",
+    "mean",
+    "median",
+    "sd",
+    "min",
+    "max",
+    "ci95_low",
+    "ci95_high",
 ]
 
 ENV_KEYS = {
@@ -135,6 +189,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default="", help="CSV output path")
     parser.add_argument(
         "--json", dest="json_output", default="", help="JSON output path"
+    )
+    parser.add_argument(
+        "--repetition-details",
+        default="",
+        help="Per-repetition CSV output path (one row per experiment and repetition).",
+    )
+    parser.add_argument(
+        "--repetition-summary",
+        default="",
+        help="Cross-repetition aggregate CSV output path (median/dispersion per metric).",
     )
     return parser.parse_args()
 
@@ -261,6 +325,7 @@ def run_one(
         hnsw_ef_construction=args.hnsw_ef_construction,
         max_queries=args.max_queries,
         repetitions=args.repetitions,
+        seed=args.seed,
         name=f"{method} k={args.k} ef={ef_search} size={size_label}",
     )
     return run_experiment(config)
@@ -326,6 +391,7 @@ def main() -> int:
     original_rows: list[tuple] = snapshot_pool(args.dataset_id) if sizes else []
 
     rows: list[dict] = []
+    experiment_ids: list[int] = []
     baseline_by_size: dict[int | None, dict] = {}
 
     try:
@@ -337,13 +403,17 @@ def main() -> int:
                 subset_dataset(args.dataset_id, size, args.seed)
 
             print(f"[size {label}] exact baseline")
-            exact = flatten(run_one(args, metric, "exact", None, label))
+            exact_result = run_one(args, metric, "exact", None, label)
+            exact = flatten(exact_result)
+            experiment_ids.append(int(exact_result["id"]))
             rows.append(exact)
             baseline_by_size[size] = exact
 
             for ef in ef_values:
                 print(f"[size {label}] HNSW ef_search={ef}")
-                approx = flatten(run_one(args, metric, "hnsw", ef, label))
+                approx_result = run_one(args, metric, "hnsw", ef, label)
+                approx = flatten(approx_result)
+                experiment_ids.append(int(approx_result["id"]))
                 approx["speedup_p50"] = _ratio(
                     exact["latency_p50_ms"], approx["latency_p50_ms"]
                 )
@@ -367,6 +437,12 @@ def main() -> int:
             json.dumps(rows, indent=2, default=str), encoding="utf-8"
         )
         print(f"JSON written to {args.json_output}")
+    if args.repetition_details:
+        _write_repetition_details(experiment_ids, args.repetition_details)
+        print(f"Per-repetition CSV written to {args.repetition_details}")
+    if args.repetition_summary:
+        _write_repetition_summary(experiment_ids, args.repetition_summary)
+        print(f"Repetition summary CSV written to {args.repetition_summary}")
 
     return 0
 
@@ -405,11 +481,89 @@ def _print_table(rows: list[dict]) -> None:
         )
 
 
-def _write_csv(rows: list[dict], path: str) -> None:
+def _write_csv(rows: list[dict], path: str, fieldnames: list[str] | None = None) -> None:
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=FIELDS)
+        writer = csv.DictWriter(fh, fieldnames=fieldnames or FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_repetition_details(experiment_ids: list[int], path: str) -> None:
+    """One row per (experiment, repetition), read back from the database.
+
+    The values come from ``experiment_repetitions``, which is written by the
+    same service the API uses, so this file cannot drift from the stored run.
+    """
+    rows: list[dict] = []
+    for experiment_id in experiment_ids:
+        experiment = get_experiment(experiment_id) or {}
+        for rep in get_repetitions(experiment_id):
+            rows.append(
+                {
+                    "experiment_id": experiment_id,
+                    "dataset_id": experiment.get("dataset_id"),
+                    "train_size": experiment.get("train_size"),
+                    "retrieval_method": experiment.get("retrieval_method"),
+                    "ef_search": experiment.get("hnsw_ef_search"),
+                    "repetition": rep["repetition"],
+                    "unique_queries": rep["unique_queries"],
+                    "samples": rep["samples"],
+                    "latency_mean_ms": rep["latency_avg_ms"],
+                    "latency_p50_ms": rep["latency_p50_ms"],
+                    "latency_p95_ms": rep["latency_p95_ms"],
+                    "latency_p99_ms": rep["latency_p99_ms"],
+                    "recall_at_k": rep["recall_at_k"],
+                    "tie_aware_recall_at_k": rep["tie_aware_recall_at_k"],
+                    "accuracy": rep["accuracy"],
+                    "precision_macro": rep["precision_macro"],
+                    "recall_macro": rep["recall_macro"],
+                    "macro_f1": rep["macro_f1"],
+                }
+            )
+    _write_csv(rows, path, REPETITION_FIELDS)
+
+
+_SUMMARY_METRICS = [
+    ("latency_mean_ms", "latency_avg_ms"),
+    ("latency_p50_ms", "latency_p50_ms"),
+    ("latency_p95_ms", "latency_p95_ms"),
+    ("latency_p99_ms", "latency_p99_ms"),
+    ("recall_at_k", "recall_at_k"),
+    ("tie_aware_recall_at_k", "tie_aware_recall_at_k"),
+    ("accuracy", "accuracy"),
+    ("precision_macro", "precision_macro"),
+    ("recall_macro", "recall_macro"),
+    ("macro_f1", "macro_f1"),
+]
+
+
+def _write_repetition_summary(experiment_ids: list[int], path: str) -> None:
+    """Median and dispersion of each metric across repetitions.
+
+    The repetitions share one query set and one index, so this spread is
+    run-to-run variability, not sampling error over a population.
+    """
+    rows: list[dict] = []
+    for experiment_id in experiment_ids:
+        experiment = get_experiment(experiment_id) or {}
+        reps = get_repetitions(experiment_id)
+        if not reps:
+            continue
+        for output_name, column in _SUMMARY_METRICS:
+            summary = repetition_summary([rep[column] for rep in reps])
+            rows.append(
+                {
+                    "experiment_id": experiment_id,
+                    "dataset_id": experiment.get("dataset_id"),
+                    "train_size": experiment.get("train_size"),
+                    "retrieval_method": experiment.get("retrieval_method"),
+                    "ef_search": experiment.get("hnsw_ef_search"),
+                    "repetitions": len(reps),
+                    "metric": output_name,
+                    **summary,
+                }
+            )
+    _write_csv(rows, path, SUMMARY_FIELDS)
 
 
 if __name__ == "__main__":

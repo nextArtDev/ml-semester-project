@@ -154,17 +154,38 @@ def drop_hnsw_index(dataset_id: int) -> None:
             ))
 
 
-def create_hnsw_index(
+@dataclass
+class IndexInfo:
+    """What actually happened to the HNSW index during this run.
+
+    ``created`` distinguishes a fresh ``CREATE INDEX`` from a reuse of an
+    index that was built by an earlier experiment. Only a fresh build has a
+    meaningful ``build_ms``; reporting a reused index's historical build time
+    as though it were paid again on every ``ef_search`` configuration would
+    misstate the cost of an index sweep.
+    """
+
+    created: bool
+    build_ms: float | None
+    m: int
+    ef_construction: int
+    size_bytes: int | None
+    distance_metric: str
+
+
+def ensure_hnsw_index(
     dataset_id: int,
     metric: DistanceMetric,
     m: int = 16,
     ef_construction: int = 64,
     force: bool = False,
-) -> float:
-    """Build the HNSW index and return the build time in milliseconds.
+) -> IndexInfo:
+    """Build the HNSW index, or reuse an equivalent one.
 
-    If an index with the same parameters already exists it is reused, which
-    keeps an ``ef_search`` sweep cheap. Pass ``force=True`` to rebuild.
+    The returned :class:`IndexInfo` records whether a build really happened,
+    which parameters the live index has, and its physical size. This is the
+    authoritative source for the persisted index metadata — the defaults in
+    Python are not evidence of what PostgreSQL actually built.
     """
     existing = get_hnsw_index(dataset_id)
     if (
@@ -173,10 +194,54 @@ def create_hnsw_index(
         and existing["distance_metric"] == metric.value
         and int(existing["m"]) == int(m)
         and int(existing["ef_construction"]) == int(ef_construction)
+        and hnsw_index_exists(dataset_id)
     ):
         logger.info("Reusing existing HNSW index for dataset %s", dataset_id)
-        return float(existing["build_ms"] or 0.0)
+        return IndexInfo(
+            created=False,
+            build_ms=float(existing["build_ms"]) if existing["build_ms"] is not None else None,
+            m=int(existing["m"]),
+            ef_construction=int(existing["ef_construction"]),
+            size_bytes=index_size_bytes(dataset_id),
+            distance_metric=str(existing["distance_metric"]),
+        )
 
+    elapsed = _build_hnsw_index(dataset_id, metric, m, ef_construction)
+    record = get_hnsw_index(dataset_id) or {}
+    return IndexInfo(
+        created=True,
+        build_ms=elapsed,
+        m=int(record.get("m", m)),
+        ef_construction=int(record.get("ef_construction", ef_construction)),
+        size_bytes=index_size_bytes(dataset_id),
+        distance_metric=metric.value,
+    )
+
+
+def create_hnsw_index(
+    dataset_id: int,
+    metric: DistanceMetric,
+    m: int = 16,
+    ef_construction: int = 64,
+    force: bool = False,
+) -> float:
+    """Backward-compatible wrapper returning the build time in milliseconds.
+
+    Returns ``0.0`` when the index was reused, because no build happened.
+    Call :func:`ensure_hnsw_index` when the created/reused distinction
+    matters.
+    """
+    info = ensure_hnsw_index(dataset_id, metric, m=m, ef_construction=ef_construction, force=force)
+    return float(info.build_ms or 0.0)
+
+
+def _build_hnsw_index(
+    dataset_id: int,
+    metric: DistanceMetric,
+    m: int,
+    ef_construction: int,
+) -> float:
+    """Run ``CREATE INDEX`` and record the measured build in the registry."""
     ops = {
         DistanceMetric.L2: "vector_l2_ops",
         DistanceMetric.COSINE: "vector_cosine_ops",
@@ -442,34 +507,46 @@ def retrieve(
 
 @dataclass
 class BatchResult:
-    """The outcome of a timed query sweep.
+    """The outcome of a repeated timed query sweep.
 
-    ``results`` holds one entry per query, taken from the final repetition,
-    and carries the neighbour sets used for the classification metrics.
-    ``latencies`` holds **every** measured sample across all repetitions, so
-    that the reported percentiles are computed over the full sample rather
-    than over a per-query average.
+    ``repetition_results[r]`` holds one :class:`RetrievalResult` per query
+    for repetition ``r``, in the same query order every time. Keeping every
+    repetition's neighbour sets — rather than only the last one — is what
+    allows classification metrics to be computed *per repetition* instead of
+    being inferred from a single aggregate.
+
+    ``repetition_latencies[r]`` holds the measured latency of each query in
+    that repetition. The warm-up query runs before the first measurement and
+    is never stored, so ``sample_count == repetitions * unique_query_count``
+    exactly.
     """
 
-    results: list[RetrievalResult]
-    latencies: list[float]
+    repetition_results: list[list[RetrievalResult]]
+    repetition_latencies: list[list[float]]
     repetitions: int
     warmup_queries: int
+    plan: str = ""
+    used_index_scan: bool = False
+    used_sequential_scan: bool = False
+    applied_ef_search: int | None = None
 
     @property
-    def used_index_scan(self) -> bool:
-        return any(r.used_index_scan for r in self.results)
+    def results(self) -> list[RetrievalResult]:
+        """Neighbour sets from the final repetition."""
+        return self.repetition_results[-1]
 
     @property
-    def used_sequential_scan(self) -> bool:
-        return any(r.used_sequential_scan for r in self.results)
+    def latencies(self) -> list[float]:
+        """Every measured latency sample, flattened across repetitions."""
+        return [ms for batch in self.repetition_latencies for ms in batch]
 
     @property
-    def applied_ef_search(self) -> int | None:
-        for result in self.results:
-            if result.applied_ef_search is not None:
-                return result.applied_ef_search
-        return None
+    def unique_query_count(self) -> int:
+        return len(self.repetition_results[0]) if self.repetition_results else 0
+
+    @property
+    def sample_count(self) -> int:
+        return sum(len(batch) for batch in self.repetition_latencies)
 
 
 def retrieve_batch(
@@ -480,46 +557,171 @@ def retrieve_batch(
     method: str = "exact",
     ef_search: int | None = None,
     repetitions: int = 1,
+    verify_plan: bool = True,
 ) -> BatchResult:
-    """Run the query set and return the measured results.
+    """Run the query set ``repetitions`` times over the same vectors.
 
-    ``repetitions`` repeats the whole sweep. The neighbour sets of the final
-    repetition are returned (and used for the classification metrics), while
-    every repetition contributes its latency to the timing sample. This keeps
-    the retrieval quality and the timing statistics consistent while reducing
-    the noise in the latter.
+    Each repetition is a complete timed pass over the whole query set. The
+    query order is identical in every repetition: the repetitions are
+    intended to expose run-to-run variability in timing and index traversal,
+    not to resample the query set. They are therefore **not** independent
+    observations of a population.
 
-    A single warm-up query is executed before the first measurement and
-    discarded.
+    The execution plan is verified once, on the first query of the first
+    repetition, and the captured plan/flags are reported for the whole batch.
+    Running ``EXPLAIN (ANALYZE)`` for every query would double the work and
+    interleave planner execution with the timed measurements.
+
+    One warm-up query is executed before the first measurement and discarded.
     """
     if repetitions < 1:
         raise ValueError(f"repetitions must be at least 1 (got {repetitions})")
 
-    per_repetition: list[list[RetrievalResult]] = []
+    repetition_results: list[list[RetrievalResult]] = []
+    repetition_latencies: list[list[float]] = []
+    plan = ""
+    used_index = False
+    used_seq = False
+    applied_ef: int | None = None
+
     for repetition in range(repetitions):
         current: list[RetrievalResult] = []
+        latencies: list[float] = []
         for i, vec in enumerate(query_vectors):
-            current.append(
-                retrieve(
-                    query_vector=vec,
-                    k=k,
-                    metric=metric,
-                    dataset_id=dataset_id,
-                    method=method,
-                    ef_search=ef_search,
-                    warmup=(repetition == 0 and i == 0),
-                )
+            first = repetition == 0 and i == 0
+            result = retrieve(
+                query_vector=vec,
+                k=k,
+                metric=metric,
+                dataset_id=dataset_id,
+                method=method,
+                ef_search=ef_search,
+                # The warm-up must precede the first timed query only.
+                warmup=first,
+                verify_plan=verify_plan and first,
             )
-        per_repetition.append(current)
-
-    latencies = [r.latency_ms for batch in per_repetition for r in batch]
+            current.append(result)
+            latencies.append(result.latency_ms)
+            if first:
+                plan = result.plan
+                used_index = result.used_index_scan
+                used_seq = result.used_sequential_scan
+                applied_ef = result.applied_ef_search
+        repetition_results.append(current)
+        repetition_latencies.append(latencies)
 
     return BatchResult(
-        results=per_repetition[-1],
-        latencies=latencies,
+        repetition_results=repetition_results,
+        repetition_latencies=repetition_latencies,
         repetitions=repetitions,
         warmup_queries=1 if query_vectors else 0,
+        plan=plan,
+        used_index_scan=used_index,
+        used_sequential_scan=used_seq,
+        applied_ef_search=applied_ef,
     )
+
+
+@dataclass
+class TieTolerance:
+    """Floating-point tolerance for "equally distant" in tie-aware recall.
+
+    Two rows are treated as equally valid neighbours when
+
+    ``distance <= boundary * (1 + relative) + absolute``
+
+    where ``boundary`` is the exact K-th neighbour distance. An exact tie
+    between duplicate feature vectors produces bit-identical distance values,
+    so the tolerance only has to absorb float4/float8 representation error;
+    it must be far smaller than the spacing between genuinely distinct
+    distances.
+    """
+
+    relative: float = 1e-6
+    absolute: float = 1e-6
+
+
+@dataclass
+class GroundTruth:
+    """Exact neighbours plus the tie-tolerant candidate set for one query."""
+
+    ids: list[int]
+    distances: list[float]
+    boundary: float
+    candidate_ids: list[int]
+    candidate_labels: dict[int, int]
+
+    @property
+    def is_tied(self) -> bool:
+        return len(self.candidate_ids) > len(self.ids)
+
+
+def _ground_truth_sql(
+    dataset_id: int, metric: DistanceMetric, k: int
+) -> sql.Composed:
+    """Exhaustive top-k plus every row tied at the K-th distance.
+
+    ``ORDER BY distance, id`` makes the conventional reference deterministic:
+    without the id tiebreak the K-th boundary row is chosen arbitrarily by
+    the executor, which would make conventional Recall@K irreproducible.
+    """
+    dist = _distance_expr(metric, use_operator=False)
+    return sql.SQL(
+        "WITH scored AS ("
+        "  SELECT id, label, {dist} AS distance FROM {t}"
+        "), boundary AS ("
+        "  SELECT COALESCE("
+        "    (SELECT distance FROM scored ORDER BY distance LIMIT 1 OFFSET {off}),"
+        "    (SELECT max(distance) FROM scored)"
+        "  ) AS b"
+        ")"
+        " SELECT id, label, distance FROM scored"
+        " WHERE distance <= (SELECT b FROM boundary) * (1 + %s) + %s"
+        " ORDER BY distance, id"
+    ).format(dist=dist, t=sql.Identifier(train_table(dataset_id)), off=sql.Literal(k - 1))
+
+
+def ground_truth_candidates(
+    query_vectors: Sequence[str],
+    k: int,
+    metric: DistanceMetric,
+    dataset_id: int,
+    tolerance: TieTolerance | None = None,
+) -> list[GroundTruth]:
+    """Reference neighbour set for every query, tie-tolerant.
+
+    Returns one :class:`GroundTruth` per query containing the exact top-k
+    ids/distances (deterministic by ``(distance, id)``), the K-th boundary
+    distance, and every training id within the tie tolerance of that
+    boundary.
+    """
+    tol = tolerance or TieTolerance()
+    stmt = _ground_truth_sql(dataset_id, metric, k)
+    out: list[GroundTruth] = []
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            for vec in query_vectors:
+                cur.execute(stmt, (vec, tol.relative, tol.absolute))
+                rows = cur.fetchall()
+                ids = [int(r["id"]) for r in rows]
+                distances = [float(r["distance"]) for r in rows]
+                if not ids:
+                    out.append(GroundTruth([], [], 0.0, [], {}))
+                    continue
+                boundary = distances[k - 1] if len(distances) >= k else distances[-1]
+                out.append(
+                    GroundTruth(
+                        ids=ids[:k],
+                        distances=distances[:k],
+                        boundary=boundary,
+                        candidate_ids=ids,
+                        candidate_labels={
+                            int(r["id"]): int(r["label"]) for r in rows
+                        },
+                    )
+                )
+    return out
 
 
 def ground_truth_ids(
@@ -528,15 +730,11 @@ def ground_truth_ids(
     metric: DistanceMetric,
     dataset_id: int,
 ) -> list[list[int]]:
-    """Exact top-k neighbour ids, used as the recall reference."""
-    out: list[list[int]] = []
-    stmt = _query_sql(dataset_id, metric, k, use_operator=False)
-    with connection() as conn:
-        with conn.cursor() as cur:
-            for vec in query_vectors:
-                cur.execute(stmt, (vec, vec))
-                out.append([int(r["id"]) for r in cur.fetchall()])
-    return out
+    """Exact top-k neighbour ids, used as the conventional recall reference."""
+    return [
+        gt.ids
+        for gt in ground_truth_candidates(query_vectors, k, metric, dataset_id)
+    ]
 
 
 def explain_plan(

@@ -155,25 +155,26 @@ def build_abstract(doc) -> None:
         "compares the two retrieval strategies in terms of neighbour-retrieval "
         "recall, classification quality (accuracy, macro precision, macro recall "
         "and macro F1), and per-query latency. Across training-set sizes of "
-        "10,000 and 50,000 rows, HNSW retrieval achieved between 86.6% and 98.5% "
-        "Recall@K while reducing median query latency by a factor of 3.2 to 45.0 "
-        "relative to the exact baseline, at a cost of at most 3.3 percentage "
-        "points of classification accuracy.",
+        "10,000 and 50,000 rows, HNSW retrieval achieved between 98.2% and "
+        "100.0% Recall@K over the tested search-effort values, while reducing "
+        "median query latency by a factor of 3.0 to 48.8 relative to the exact "
+        "baseline. Classification accuracy differed from the exact baseline by "
+        "at most 0.2 percentage points in either direction.",
     )
     p(
         doc,
-        "The central finding is that classification quality is far more robust "
-        "than retrieval quality: a missed neighbour changes the predicted class "
-        "only when it flips the majority vote, so the accuracy penalty of "
-        "approximation is roughly an order of magnitude smaller than the recall "
-        "penalty. The second finding is that the benefit of approximation is not "
-        "a constant factor but grows with the dataset — the measured speed-up "
-        "widened from 11.3× at 10,000 rows to 45.0× at 50,000 rows. Together "
-        "these results identify the conditions under which approximate vector "
-        "search provides a practical benefit for classical machine learning "
-        "workloads, and support the conclusion that such systems can offer "
-        "order-of-magnitude latency improvements at an accuracy cost small enough "
-        "to be operationally irrelevant.",
+        "The central observation is that classification quality was far more "
+        "stable than retrieval quality on this workload: a missed neighbour "
+        "changes the predicted class only when it flips the majority vote, so "
+        "the accuracy difference is much smaller than the recall difference. A "
+        "second observation is that the benefit of approximation is not a "
+        "constant factor but grows with the table: the measured speed-up "
+        "widened from 13.1× at 10,000 rows to 48.8× at 50,000 rows at the "
+        "lowest search effort. These results identify conditions under which "
+        "approximate vector search provides a practical benefit for classical "
+        "machine learning workloads. They are measurements from one dataset and "
+        "one machine, not a guarantee that HNSW achieves near-perfect recall "
+        "or that recall is monotonic in every experiment.",
     )
 
     p(doc, "Keywords: ", bold_lead="")
@@ -581,20 +582,27 @@ def build_chapter_3(doc) -> None:
     )
     p(
         doc,
-        "Numeric features are standardised to zero mean and unit variance. "
-        "Categorical features are ordinal-encoded using a mapping learned from "
-        "the training split; categories unseen during training map to a "
-        "reserved level rather than raising an error. All features are then "
-        "scaled together, so that a feature with a large raw magnitude — "
-        "elevation, for example, which ranges into the thousands — cannot "
-        "dominate the distance computation.",
+        "Two preprocessing modes are implemented, and the distinction matters "
+        "because it changes the geometry of the vector space. The primary "
+        "covertype mode standardises the ten continuous features to zero mean "
+        "and unit variance and leaves the 44 wilderness and soil indicators as "
+        "0/1. The indicators are already dimensionless and sparse; "
+        "standardising them would spread each one across two non-zero values "
+        "without changing which rows are close, and would destroy the sparsity "
+        "the representation depends on. Arbitrary uploaded CSVs take the "
+        "second path: median imputation, one-hot encoding of nominal columns, "
+        "and standardisation of the resulting numeric block. An explicit "
+        "standardize_all mode standardises every column, including the "
+        "indicators; it is a separately labelled comparison, not the primary "
+        "configuration.",
     )
     note(
         doc,
-        "The fitted state is serialised to JSON and stored on the dataset row. "
-        "Every experiment therefore records exactly which transformation was "
-        "applied, and any experiment can be reproduced from its stored "
-        "configuration alone.",
+        "The fitted state is serialised to JSON and stored on the dataset row, "
+        "together with a fingerprint that covers the row count, the ordered "
+        "(id, label) sequence and a checksum of the stored vector text. Every "
+        "experiment records the mode and the fingerprint, so a result can be "
+        "traced to an exact pool composition rather than to a dataset name.",
     )
 
     h2(doc, "3.3 Feature Vector Storage")
@@ -719,13 +727,26 @@ def build_chapter_3(doc) -> None:
     h3(doc, "3.5.2 Index reuse")
     p(
         doc,
-        "Building an HNSW index is a significant one-off cost — approximately "
-        "3.1 seconds for 50,000 rows on the evaluation machine. Because "
-        "ef_search is a query-time parameter, a sweep across many values does "
-        "not require the index to be rebuilt. The platform maintains an "
-        "hnsw_indexes registry table recording the metric and build parameters "
-        "of the index that exists for a dataset, and reuses the index whenever "
-        "those parameters are unchanged.",
+        "Building an HNSW index is a significant one-off cost — 597.6 ms for "
+        "9,999 rows and 3,239.0 ms for 50,000 rows on the evaluation machine. "
+        "Because ef_search is a query-time parameter, a sweep across many "
+        "values does not require the index to be rebuilt. The platform "
+        "maintains an hnsw_indexes registry table recording the metric and "
+        "build parameters of the index that exists for a dataset, and reuses "
+        "the index whenever those parameters are unchanged and the physical "
+        "index is still present.",
+    )
+    p(
+        doc,
+        "Reuse creates an accounting problem that is easy to get wrong. A "
+        "reused index has no current build time, so the experiment stores "
+        "index_build_ms as NULL, index_reused as true, and the historical "
+        "duration in index_reused_build_ms. Reporting the historical figure as "
+        "a cost paid by each ef_search configuration would overstate the cost "
+        "of the sweep and understate the benefit of reuse. The live index "
+        "parameters and pg_relation_size are read back from the server rather "
+        "than copied from Python defaults, so the stored metadata describes the "
+        "index that actually answered the query.",
     )
 
     h2(doc, "3.6 Classification")
@@ -763,18 +784,33 @@ def build_chapter_3(doc) -> None:
             ],
             [
                 "Retrieval",
-                "Recall@K",
-                "Mean fraction of the exact top-k neighbours that were retrieved",
+                "Conventional Recall@K",
+                "Mean fraction of the deterministic exact top-k neighbours "
+                "whose identifiers were retrieved (ties broken by id)",
+            ],
+            [
+                "Retrieval",
+                "Tie-aware Recall@K",
+                "Mean fraction of retrieved neighbours that fall inside the "
+                "exact K-th distance boundary, within a documented tolerance",
             ],
             [
                 "Performance",
                 "Latency avg / p50 / p95 / p99",
-                "Wall-clock duration of an individual retrieval query",
+                "Wall-clock duration of an individual retrieval query, over "
+                "every stored observation",
             ],
             [
                 "Index",
                 "Index build time",
-                "Duration of the CREATE INDEX statement that actually ran",
+                "Duration of the CREATE INDEX statement that actually ran; "
+                "NULL when an existing index was reused",
+            ],
+            [
+                "Index",
+                "Index reuse",
+                "Whether the index existed before the run, with the historical "
+                "build time recorded separately",
             ],
             [
                 "Index",
@@ -789,31 +825,92 @@ def build_chapter_3(doc) -> None:
         doc,
         "Recall@K is the metric that isolates the retrieval stage. It compares "
         "the identifiers returned by the approximate method against the "
-        "identifier set produced by the exact baseline for the same query, and "
-        "reports the mean overlap fraction. It is therefore a direct, "
-        "assumption-free measurement of retrieval quality that does not depend "
-        "on the classification task at all.",
+        "identifier set produced by the exact baseline for the same query. The "
+        "exact top-k is made deterministic with ORDER BY distance, id, so the "
+        "K-th row does not depend on the executor's arbitrary choice among "
+        "equally distant rows. Conventional Recall@K counts a retrieved row "
+        "with the same distance but a different identifier as a miss.",
+    )
+    p(
+        doc,
+        "A second, tie-aware variant treats any row within a documented "
+        "floating-point tolerance of the exact K-th distance as a valid answer. "
+        "The candidate set is every training identifier whose distance is at "
+        "most boundary × (1 + 1e-6) + 1e-6, and the score is the fraction of "
+        "the k retrieved rows that fall inside that set, capped at 1.0. "
+        "Dividing by k keeps it comparable with the conventional metric. Both "
+        "metrics are persisted per experiment together with the two tolerance "
+        "values, and neither replaces the other.",
+    )
+    p(
+        doc,
+        "Conventional Recall@K is not, in general, a mathematical lower bound "
+        "on retrieval quality. It becomes one only when every alternative at "
+        "the boundary is equally distant, all such alternatives are present in "
+        "the reference candidate set, and the downstream task is indifferent "
+        "between them. The tie-aware metric makes the second condition "
+        "explicit; the first and third must be established rather than "
+        "assumed. The next section explains why this matters less on "
+        "Covertype than a plausible hypothesis suggested.",
     )
     h3(doc, "3.7.2 Measurement protocol")
     bullet_list(
         doc,
         [
-            "The first query of every run is executed twice and the first "
-            "execution discarded, so that reported latency excludes first-call "
-            "planning and cold-buffer effects.",
+            "One warm-up query is executed immediately before the first timed "
+            "query of a batch and then discarded, so reported latency excludes "
+            "first-call planning and cold-buffer effects. The warm-up is not "
+            "repeated for later passes, because discarding a measured query "
+            "from every pass would silently shrink the stored sample count.",
             "Each query is issued separately rather than batched, so that a "
             "per-query latency can be measured; a batched workload would "
             "amortise the round-trip and change the speed-up ratio.",
-            "For every HNSW run, the retrieval query is re-executed under "
-            "EXPLAIN (ANALYZE) and the resulting plan is inspected to confirm "
-            "that an index scan was actually used. The outcome is recorded on "
-            "the experiment row and displayed in the user interface, so that a "
-            "run which silently fell back to a sequential scan cannot be "
-            "mistaken for an approximate result.",
+            "repetitions performs that many complete timed passes over the same "
+            "query set, in the same query order. It is not a multiplier applied "
+            "to a counter: every pass executes every query, and every latency "
+            "is stored with its repetition number.",
+            "Four quantities are reported separately: the held-out test pool, "
+            "the number of unique evaluated queries, the number of repetitions, "
+            "and the number of latency observations, which is exactly the "
+            "product of the last two.",
+            "Because the passes share the query set, the order and the index, "
+            "they measure run-to-run variability rather than sampling error. "
+            "Cross-repetition medians, standard deviations and 95% intervals "
+            "are reported with that distinction stated; three repetitions "
+            "cannot support a narrow interval.",
+            "For every HNSW batch, the retrieval query is executed under "
+            "EXPLAIN (ANALYZE) once and the resulting plan is inspected to "
+            "confirm that an index scan was actually used. The outcome is "
+            "recorded on the experiment row and displayed in the user "
+            "interface, so a run which silently fell back to a sequential scan "
+            "cannot be mistaken for an approximate result.",
             "The exact ground truth is computed for every query of every run, "
-            "so Recall@K is measured against a reference that was produced in "
-            "the same session, on the same data, by the same code path.",
+            "so Recall@K is measured against a reference produced in the same "
+            "session, on the same data, by the same code path.",
         ],
+    )
+    h3(doc, "3.7.3 Duplicate vectors and ties, measured")
+    p(
+        doc,
+        "A plausible explanation for a recall/accuracy gap is that duplicate "
+        "feature vectors give equally valid neighbours the same distance, so "
+        "identifier-level recall understates retrieval quality. That "
+        "explanation is testable, and it was tested rather than assumed. The "
+        "platform measures unique vector count, duplicate groups, the largest "
+        "group, the number of groups containing conflicting labels, the number "
+        "of queries whose exact K-th distance is tied, and whether any tie "
+        "would change the majority vote.",
+    )
+    p(
+        doc,
+        "For the 50,000-row Covertype training pool the measurement returns "
+        "50,000 unique vectors, zero duplicate groups, a largest group of 1, "
+        "zero mixed-label groups, and zero tied queries out of 1,000 at k = 5 "
+        "with L2 distance. The raw 581,012-row file likewise contains 581,012 "
+        "unique full-feature vectors. The duplicate hypothesis is therefore "
+        "rejected for this dataset: conventional and tie-aware Recall@K "
+        "coincide here because there are no boundary ties, which is a measured "
+        "outcome rather than a definitional identity.",
     )
     h3(doc, "3.7.3 Threats to validity")
     table(

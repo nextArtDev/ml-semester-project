@@ -61,20 +61,40 @@ request.
 
 ## Warm-up query
 
-The first query of every run is executed twice and only the second execution
-is timed. This removes first-call planning cost and cold-buffer effects from
-the measurement. Without it the very first query of a run reports a latency
-an order of magnitude above the rest.
+One warm-up query is executed immediately before the first timed query of a
+batch and then discarded. This removes first-call planning cost and
+cold-buffer effects from the first measurement. Later repetitions of the same
+query set do **not** repeat the warm-up: the cache and the plan are already
+warm, and discarding a measured query from every pass would silently shrink
+the stored sample count.
+
+## Repetitions
+
+`repetitions` is the number of complete timed passes over the query set, not a
+multiplier applied to a counter. Every pass executes every query, every
+latency is stored with its repetition number, and the persisted row count is
+exactly `repetitions × unique_queries`. The query order is identical in every
+pass, so the repetitions measure run-to-run variability (timing, buffer state,
+graph traversal) rather than population sampling. Per-pass metrics are stored
+in `experiment_repetitions`; they are not inferred from the aggregate row.
 
 ## Index reuse
 
-Building an HNSW index over 15 000 rows takes roughly 2 seconds. Since
-`ef_search` is a *query-time* parameter, a sweep over many `ef_search` values
-must not rebuild the index each time.
+Building an HNSW index over 50,000 rows took 3.24 s on the evaluation machine.
+Since `ef_search` is a *query-time* parameter, a sweep over many `ef_search`
+values must not rebuild the index each time.
 
 The `hnsw_indexes` registry table records the metric and build parameters of
-the index that exists for a dataset. `create_hnsw_index` reuses it when the
-parameters match, and rebuilds only when they change.
+the index that exists for a dataset. `ensure_hnsw_index` returns an
+`IndexInfo` describing what actually happened: whether a build ran, its
+measured duration, the live index's `m`/`ef_construction`, and its size. It
+reuses an index only when the metric and both build parameters match *and* the
+physical index is present, and rebuilds otherwise.
+
+A reused index has **no** current build time. The experiment stores
+`index_build_ms = NULL`, `index_reused = True`, and the historical duration in
+`index_reused_build_ms`. Reporting the historical figure as a cost paid by
+each `ef_search` configuration would overstate the sweep's cost.
 
 The exact baseline deliberately **does not drop** the index. Because the
 function form cannot use it anyway, leaving it in place means a following HNSW
@@ -91,8 +111,9 @@ stratified_split  ──────────────► train_df        
       │                    fit_preprocessor(train_df)    │  ← statistics from
       │                              │                   │    training only
       │                              ▼                   │
-      │                    StandardScaler + ordinal      │
-      │                    encoding                     │
+      │              standardise 10 continuous,          │
+      │              keep 44 indicators 0/1              │
+      │              (one-hot nominal for uploads)       │
       │                              │                   │
       │                              ▼                   ▼
       │                    transform(train)      transform(test)
@@ -110,13 +131,37 @@ stratified_split  ──────────────► train_df        
                         majority vote → metrics → experiments
 ```
 
+## Ground truth and ties
+
+The reference neighbours always come from the exhaustive query using the
+distance *function*, whatever method is under test. Two properties make the
+reference reproducible:
+
+* the exact top-k is ordered by `(distance, id)`, so the K-th row is chosen
+  deterministically when distances are equal;
+* a second query returns every id whose distance is within a documented
+  floating-point tolerance of the K-th boundary distance
+  (`boundary × (1 + 1e-6) + 1e-6`).
+
+Conventional Recall@K compares retrieved ids against the deterministic top-k.
+Tie-aware Recall@K counts any retrieved id inside the boundary candidate set
+as valid and divides by `k`. The tolerance and both metrics are persisted per
+experiment. On a pool with no boundary ties the two metrics coincide, which is
+a measurable outcome rather than an assumption.
+
 ## Measurement order
 
 Within a single experiment run:
 
 1. The HNSW index is created (or reused) and `ANALYZE` refreshes planner stats.
-2. The **exact** ground-truth neighbour set is computed for every query.
-3. The method under test is run for every query, with a warm-up query first.
-4. Recall@K compares the retrieved ids against the ground-truth ids.
+2. The **exact** ground-truth ids and boundary candidate sets are computed for
+   every query.
+3. The method under test runs `repetitions` complete passes over the query
+   set, with one warm-up query before the first pass.
+4. Conventional and tie-aware Recall@K are computed **per repetition** from
+   that pass's neighbour sets, as are accuracy, macro precision/recall/F1 and
+   the confusion matrix.
 5. Both neighbour sets are fed through the *same* majority-voting function, so
    any accuracy difference is attributable purely to the retrieval stage.
+6. The aggregate row is written, then one `experiment_repetitions` row per
+   pass and one `query_latencies` row per measured query.

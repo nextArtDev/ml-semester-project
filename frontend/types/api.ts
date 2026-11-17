@@ -47,16 +47,31 @@ export interface Experiment {
   distance_metric: DistanceMetric
   hnsw_ef_search: number | null
   hnsw_m: number | null
+  hnsw_ef_construction: number | null
   train_size: number
   test_size: number
+  unique_queries: number
+  total_test_pool: number
   index_build_ms: number | null
+  index_created_ms: number | null
+  index_reused: boolean | null
+  index_reused_build_ms: number | null
   index_size_bytes: number | null
   repetitions: number
   recall_at_k: number | null
+  tie_aware_recall_at_k: number | null
+  tied_queries: number | null
+  max_tied_candidates: number | null
   accuracy: number | null
   precision_macro: number | null
   recall_macro: number | null
   macro_f1: number | null
+  accuracy_std: number | null
+  macro_f1_std: number | null
+  recall_at_k_std: number | null
+  tie_aware_recall_at_k_std: number | null
+  dataset_fingerprint: string | null
+  seed: number | null
   latency_avg_ms: number | null
   latency_p50_ms: number | null
   latency_p95_ms: number | null

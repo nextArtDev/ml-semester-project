@@ -181,9 +181,15 @@ class TestHNSWRetrieval:
         assert int(record["size_bytes"]) == size
 
     def test_index_is_reused(self, dataset_id: int) -> None:
-        first = vs.create_hnsw_index(dataset_id, DistanceMetric.L2)
-        second = vs.create_hnsw_index(dataset_id, DistanceMetric.L2)
-        assert first == pytest.approx(second)
+        first = vs.ensure_hnsw_index(dataset_id, DistanceMetric.L2)
+        second = vs.ensure_hnsw_index(dataset_id, DistanceMetric.L2)
+        assert first.created is True
+        assert first.build_ms is not None and first.build_ms > 0
+        assert second.created is False
+        # A reuse must not claim to have paid the build cost again.
+        assert second.build_ms == pytest.approx(first.build_ms)
+        assert second.m == first.m
+        assert second.ef_construction == first.ef_construction
 
     def test_index_is_rebuilt_when_parameters_change(self, dataset_id: int) -> None:
         vs.create_hnsw_index(dataset_id, DistanceMetric.L2, m=16, ef_construction=64)
@@ -260,12 +266,68 @@ class TestBatchResult:
         assert batch.repetitions == 3
         assert batch.warmup_queries == 1
 
+    def test_each_repetition_runs_the_whole_query_set(self, dataset_id: int) -> None:
+        vectors = [r[2] for r in vs.load_test_vectors(dataset_id, 4)]
+        batch = vs.retrieve_batch(
+            vectors, 5, DistanceMetric.L2, dataset_id, method="exact", repetitions=3
+        )
+        assert len(batch.repetition_results) == 3
+        assert all(len(rep) == 4 for rep in batch.repetition_results)
+        assert all(len(rep) == 4 for rep in batch.repetition_latencies)
+        assert batch.unique_query_count == 4
+        assert batch.sample_count == 12
+
+    def test_repetitions_are_not_copied_metric_values(self, dataset_id: int) -> None:
+        """Each repetition must be a separately executed pass."""
+        vectors = [r[2] for r in vs.load_test_vectors(dataset_id, 6)]
+        batch = vs.retrieve_batch(
+            vectors, 5, DistanceMetric.L2, dataset_id, method="exact", repetitions=3
+        )
+        # Separate result objects per repetition, not one shared list.
+        assert batch.repetition_results[0] is not batch.repetition_results[1]
+        # Independently measured observations: the 18 samples are not one
+        # constant duplicated 18 times.
+        assert len(set(batch.latencies)) > 1
+
+    def test_warmup_is_excluded_from_samples(self, dataset_id: int) -> None:
+        vectors = [r[2] for r in vs.load_test_vectors(dataset_id, 3)]
+        batch = vs.retrieve_batch(
+            vectors, 5, DistanceMetric.L2, dataset_id, method="exact", repetitions=2
+        )
+        assert batch.warmup_queries == 1
+        # Exactly repetitions * queries samples; the warm-up adds none.
+        assert len(batch.latencies) == 6
+        assert batch.sample_count == 6
+
     def test_repetitions_rejected_when_zero(self, dataset_id: int) -> None:
         vectors = [r[2] for r in vs.load_test_vectors(dataset_id, 2)]
         with pytest.raises(ValueError, match="repetitions"):
             vs.retrieve_batch(
                 vectors, 5, DistanceMetric.L2, dataset_id, repetitions=0
             )
+
+
+class TestGroundTruthCandidates:
+    def test_candidates_superset_of_exact_top_k(self, dataset_id: int) -> None:
+        vector = vs.load_test_vectors(dataset_id, 1)[0][2]
+        gt = vs.ground_truth_candidates([vector], 5, DistanceMetric.L2, dataset_id)[0]
+        assert len(gt.ids) == 5
+        assert set(gt.ids).issubset(set(gt.candidate_ids))
+        assert gt.boundary == pytest.approx(gt.distances[-1])
+        assert gt.candidate_labels
+
+    def test_random_continuous_data_has_no_boundary_ties(self, dataset_id: int) -> None:
+        vectors = [r[2] for r in vs.load_test_vectors(dataset_id, 10)]
+        ground_truth = vs.ground_truth_candidates(
+            vectors, 5, DistanceMetric.L2, dataset_id
+        )
+        assert all(not gt.is_tied for gt in ground_truth)
+
+    def test_exact_ids_are_deterministic(self, dataset_id: int) -> None:
+        vectors = [r[2] for r in vs.load_test_vectors(dataset_id, 5)]
+        first = vs.ground_truth_ids(vectors, 5, DistanceMetric.L2, dataset_id)
+        second = vs.ground_truth_ids(vectors, 5, DistanceMetric.L2, dataset_id)
+        assert first == second
 
 
 class TestPlanDetection:

@@ -1,0 +1,29 @@
+{
+  "dataset_id": 116,
+  "dataset_fingerprint": "6baa8fa283ea5a8267d3e964eedf5d2a",
+  "duplicates": {
+    "dataset_id": 116,
+    "total_vectors": 50000,
+    "unique_vectors": 50000,
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "duplicate_row_pct": 0.0,
+    "largest_group": 1,
+    "mixed_label_groups": 0,
+    "mixed_label_group_pct": 0.0,
+    "mixed_label_rows": 0
+  },
+  "ties": {
+    "dataset_id": 116,
+    "k": 5,
+    "distance_metric": "l2",
+    "evaluated_queries": 1000,
+    "tied_queries": 0,
+    "tied_query_pct": 0.0,
+    "max_candidate_set": 5,
+    "queries_with_label_changing_tie": 0,
+    "queries_with_same_label_tie": 0,
+    "tolerance_relative": 1e-06,
+    "tolerance_absolute": 1e-06
+  }
+}

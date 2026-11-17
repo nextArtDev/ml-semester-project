@@ -88,15 +88,24 @@ class ExperimentSummary(BaseModel):
     k: int
     distance_metric: str
     hnsw_ef_search: int | None
+    hnsw_m: int | None = None
+    hnsw_ef_construction: int | None = None
     train_size: int
     test_size: int
+    unique_queries: int = 0
+    total_test_pool: int = 0
+    repetitions: int = 1
     recall_at_k: float | None
+    tie_aware_recall_at_k: float | None = None
     accuracy: float | None
     macro_f1: float | None
     latency_avg_ms: float | None
     latency_p50_ms: float | None
     latency_p95_ms: float | None
     index_build_ms: float | None
+    index_size_bytes: int | None = None
+    index_reused: bool | None = None
+    used_index_scan: bool | None = None
     status: str
     created_at: str
 

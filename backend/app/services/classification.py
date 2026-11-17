@@ -128,7 +128,14 @@ def evaluate_predictions(
 
 
 def recall_at_k(retrieved: Sequence[Sequence[int]], ground_truth: Sequence[Sequence[int]]) -> float:
-    """Mean fraction of true neighbours that were retrieved."""
+    """Conventional Recall@K: fraction of exact neighbour ids retrieved.
+
+    The reference ids come from the exhaustive query's ``ORDER BY distance
+    LIMIT k``. When several training rows share the K-th distance, PostgreSQL
+    returns an arbitrary subset of them, so this metric treats an equally
+    distant but differently-identified neighbour as a miss. See
+    :func:`tie_aware_recall_at_k` for the tie-tolerant companion metric.
+    """
     if not retrieved or not ground_truth:
         return 0.0
     scores: list[float] = []
@@ -140,6 +147,98 @@ def recall_at_k(retrieved: Sequence[Sequence[int]], ground_truth: Sequence[Seque
         hits = sum(1 for w in want if w in got_set)
         scores.append(hits / len(want))
     return float(np.mean(scores))
+
+
+def tie_aware_recall_at_k(
+    retrieved: Sequence[Sequence[int]],
+    candidate_sets: Sequence[Sequence[int]],
+) -> float:
+    """Tie-aware Recall@K.
+
+    For each query, ``candidate_sets[i]`` is every training id whose distance
+    is less than or equal to the exact K-th neighbour distance plus a
+    documented tolerance (see :func:`app.services.vector_store.ground_truth_candidates`).
+    Any retrieved neighbour inside that set is a valid answer, because an
+    exhaustive scan could legitimately have returned it in place of a
+    boundary-tied row.
+
+    The score is ``|retrieved INTERSECT candidates| / k``, capped at 1.0.
+    Dividing by ``k`` (rather than by the candidate-set size) keeps the
+    metric comparable with conventional Recall@K: a system that returns ``k``
+    valid neighbours scores 1.0 even when the candidate set is larger than
+    ``k``.
+
+    This metric is **not** a replacement for conventional Recall@K. It
+    isolates the effect of arbitrary tie-breaking; the conventional metric
+    still reports the identifier-level agreement.
+    """
+    if not retrieved or not candidate_sets:
+        return 0.0
+
+    scores: list[float] = []
+    for got, candidates in zip(retrieved, candidate_sets):
+        if not got:
+            scores.append(0.0)
+            continue
+        valid = set(candidates)
+        hits = sum(1 for row_id in got if row_id in valid)
+        scores.append(min(hits, len(got)) / len(got))
+    return float(np.mean(scores))
+
+
+# Two-sided 97.5 % critical values of Student's t, indexed by degrees of
+# freedom. Kept inline so the metric layer has no SciPy dependency.
+_T_CRITICAL_975: dict[int, float] = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+    6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+    15: 2.131, 20: 2.086, 25: 2.060, 30: 2.042,
+}
+
+
+def _t_critical(df: int) -> float:
+    if df < 1:
+        return float("nan")
+    if df in _T_CRITICAL_975:
+        return _T_CRITICAL_975[df]
+    if df < 15:
+        return _T_CRITICAL_975[df - 1] if df - 1 in _T_CRITICAL_975 else 1.96
+    return 1.96
+
+
+def repetition_summary(values: Sequence[float]) -> dict[str, float | None]:
+    """Summarise a metric measured once per repetition.
+
+    Repetitions of the same query set are **not** independent experiments:
+    they reuse the same pool, the same queries and (for HNSW) the same graph,
+    so the spread measures run-to-run timing/state variability, not sampling
+    error over a population. The returned standard deviation and confidence
+    interval must be read that way.
+    """
+    clean = [float(v) for v in values if v is not None]
+    if not clean:
+        return {"mean": None, "median": None, "sd": None, "min": None,
+                "max": None, "ci95_low": None, "ci95_high": None}
+
+    arr = np.asarray(clean, dtype=np.float64)
+    n = arr.size
+    mean = float(arr.mean())
+    sd = float(arr.std(ddof=1)) if n > 1 else 0.0
+
+    if n > 1:
+        half = _t_critical(n - 1) * sd / float(np.sqrt(n))
+        low, high = mean - half, mean + half
+    else:
+        low = high = None
+
+    return {
+        "mean": mean,
+        "median": float(np.median(arr)),
+        "sd": sd,
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+        "ci95_low": low,
+        "ci95_high": high,
+    }
 
 
 def latency_stats(latencies_ms: Sequence[float]) -> dict[str, float]:

@@ -116,9 +116,11 @@ Plus: the ingested dataset row must report
 5. Every retrieval captures `EXPLAIN (ANALYZE, BUFFERS)` and records
    `used_index_scan`, `used_sequential_scan` and `applied_ef_search`. The app
    therefore reports when HNSW was **not** used instead of assuming it was.
-6. Index build time and on-disk index size are recorded
-   (`pg_relation_size`), and the index is reused when metric and build
-   parameters are unchanged.
+6. `ensure_hnsw_index()` returns an `IndexInfo` describing whether a build ran,
+   its duration, the live index's `m`/`ef_construction` and its
+   `pg_relation_size`. A reused index reports `index_build_ms = NULL` and its
+   historical duration in `index_reused_build_ms`, so an `ef_search` sweep
+   never presents a historical build as a fresh cost.
 
 **Acceptance check**
 
@@ -140,19 +142,27 @@ the requested value.
 1. Majority voting over the returned neighbours, identical code path for both
    methods, so any accuracy difference is attributable to retrieval alone.
 2. Metrics: accuracy, macro precision / recall / F1, per-class metrics,
-   confusion matrix, Recall@K against exact ground truth.
-3. Latency: warm-up query discarded, then `repetitions` full passes over the
-   same query set; every pass contributes a latency sample. p50/p95/p99,
-   mean, min, max, and `api_overhead_s` (end-to-end time minus query time) are
-   stored separately.
-4. Environment metadata captured per experiment: Python, OS, CPU, memory,
-   NumPy / pandas / scikit-learn / psycopg / FastAPI versions, PostgreSQL and
-   pgvector versions, plus `repetitions`, `measured_queries`,
-   `warmup_queries`, `preprocessing_mode`, `applied_ef_search`.
+   confusion matrix, conventional Recall@K against a deterministic exact
+   reference (`ORDER BY distance, id`), and tie-aware Recall@K against the
+   boundary candidate set (`distance <= boundary × (1 + 1e-6) + 1e-6`).
+   Both recall metrics are persisted. The tolerance is stored on the
+   experiment row.
+3. Latency: one warm-up query, then `repetitions` complete passes over the
+   same query set in the same order; every pass contributes individually
+   stored samples. p50/p95/p99, mean, min, max, and `api_overhead_s`
+   (end-to-end time minus query time) are stored separately. Recall,
+   accuracy and macro metrics are computed **per repetition** and written to
+   `experiment_repetitions`; the aggregate row carries their mean and standard
+   deviation across passes.
+4. Environment metadata captured per experiment: Python, OS, machine, CPU
+   cores, PostgreSQL and pgvector versions, plus `repetitions`,
+   `measured_queries`, `unique_queries`, `total_test_pool`, `warmup_queries`,
+   `preprocessing_mode`, `applied_ef_search`, plan verification,
+   dataset fingerprint, seed and tie tolerance.
 
-**Acceptance check** — a run reports `repetitions=3` with
-`measured_queries = queries × 3`, and `environment.applied_ef_search` equals
-the requested `ef_search`.
+**Acceptance check** — a run with `--max-queries 1000 --repetitions 3`
+stores exactly 3,000 `query_latencies` rows and 3 `experiment_repetitions`
+rows, and `environment.applied_ef_search` equals the requested `ef_search`.
 
 ---
 
@@ -160,49 +170,74 @@ the requested `ef_search`.
 
 **Status: done.**
 
-`backend/scripts/run_experiments.py` now exports 38 columns and accepts
-`--repetitions` (default 3). It also:
+`backend/scripts/run_experiments.py` now exports 52 columns and accepts
+`--repetitions` (default 3), `--repetition-details` and
+`--repetition-summary`. It also:
 
 1. Subsamples the training pool **stratified by label**, with a seeded
    `setseed`, so `--sizes` preserves class proportions instead of truncating
    by insertion order.
-2. Emits `repetitions`, `precision_macro`, `recall_macro`, `latency_p99_ms`,
-   `latency_min_ms`, `latency_max_ms`, `index_size_bytes`, `api_overhead_s`,
-   `applied_ef_search`, `used_sequential_scan`, `speedup_p50`, `speedup_avg`,
-   `preprocessing_mode` and the environment block.
-3. Prints a stderr warning when a HNSW run reports `used_index_scan = False`,
+2. Emits `unique_queries`, `total_test_pool`, `measured_queries`,
+   `repetitions`, `precision_macro`, `recall_macro`, `latency_p99_ms`,
+   `latency_min_ms`, `latency_max_ms`, `tie_aware_recall_at_k`,
+   `tied_queries`, `max_tied_candidates`, `dataset_fingerprint`, `seed`,
+   `index_created_ms`, `index_reused`, `index_reused_build_ms`,
+   `index_size_bytes`, `api_overhead_s`, `applied_ef_search`,
+   `used_sequential_scan`, `speedup_p50`, `speedup_avg`, `preprocessing_mode`
+   and the environment block.
+3. Writes `repetition_details.csv` (one row per experiment and pass) and
+   `repetition_summary.csv` (median, SD, min/max and 95 % interval per metric)
+   by reading the rows back from the database, so the files cannot drift from
+   the persisted run.
+4. Prints a stderr warning when a HNSW run reports `used_index_scan = False`,
    so a silent sequential-scan fallback cannot be mistaken for HNSW latency.
-4. Restores the original training pool in a `finally` block, even if a run
+5. Restores the original training pool in a `finally` block, even if a run
    fails.
 
 **Acceptance check**
 
 ```powershell
 cd backend
-.venv\Scripts\python -m scripts.run_experiments --help     # lists --repetitions
+.venv\Scripts\python -m scripts.run_experiments --help     # lists the new flags
 ```
 
-Verified: a 5,000-row subsample of a 25,000-row pool ran, then the pool was
-restored to 25,000 rows exactly.
+`tests/test_run_experiments.py` runs the script end-to-end on a synthetic
+dataset and checks the CSV/JSON field set, value agreement, per-repetition row
+count, summary row count, index-reuse bookkeeping and persisted latency
+count. Verified by hand: a 5,000-row subsample of a 25,000-row pool ran, then
+the pool was restored to 25,000 rows exactly.
 
 ---
 
 ## Phase 6 — Full experimental sweep
 
-**Status: done — 14 rows in `docs/results/sweep.csv`.**
+**Status: done — 14 rows in `docs/results/sweep.csv`, 42 rows in
+`repetition_details.csv`, 140 rows in `repetition_summary.csv`.**
 
 Dataset 116 (`Covertype 50k`, `preprocessing_mode=covertype`, 50,000 train /
-3,000 test, 54 dimensions) was ingested for this sweep. Training pools of
-9,999 and 50,000 rows were measured at `ef_search` 10, 25, 50, 100, 200, 400,
-`k = 5`, L2, 1,000 queries, 3 repetitions.
+3,000 test, 54 dimensions, fingerprint `6baa8fa283ea5a8267d3e964eedf5d2a`)
+was ingested for this sweep. Training pools of 9,999 and 50,000 rows were
+measured at `ef_search` 10, 25, 50, 100, 200, 400, `k = 5`, L2, 1,000 unique
+queries, 3 repetitions, `seed = 0`.
 
 Verified after the run:
 
 * 0 HNSW rows without an index scan;
 * 0 exact rows without a sequential scan;
 * 0 mismatches between requested and applied `ef_search`;
-* 3,000 measured latencies per run (1,000 × 3);
-* `preprocessing_mode = covertype` on every row.
+* 3,000 stored latency rows and 3 `experiment_repetitions` rows per
+  experiment — 42,000 and 42 in total;
+* `preprocessing_mode = covertype` on every row;
+* `dataset_fingerprint`, `seed` and tie tolerances present on every row;
+* first HNSW row per pool size has `index_build_ms` and
+  `index_reused = False`; later `ef_search` rows have `index_build_ms = NULL`
+  and the historical time in `index_reused_build_ms`.
+
+Measured duplicate/tie statistics for the same pool
+(`docs/results/duplicate_stats.json`): 50,000 unique vectors, 0 duplicate
+groups, 0 mixed-label groups, 0 tied queries in 1,000, largest boundary
+candidate set 5. The raw 581,012-row file also has zero duplicate
+full-feature vectors.
 
 Matrix that was run (`preprocessing_mode=covertype`, one dataset row):
 
@@ -213,8 +248,8 @@ Matrix that was run (`preprocessing_mode=covertype`, one dataset row):
 | `ef_search` | 10, 25, 50, 100, 200, 400 | yes |
 | `k` | 5 (primary), plus 1/15 for the neighbourhood sweep | k=5 only |
 | Metric | L2 (primary), plus cosine for the metric sweep | L2 only |
-| Queries | 1,000 per run | yes |
-| Repetitions | 3 | yes |
+| Queries | 1,000 unique per run | yes |
+| Repetitions | 3 complete passes | yes |
 | HNSW build | `m=16`, `ef_construction=64` | yes |
 
 The `k` sweep, the cosine metric sweep, a larger training pool and a
@@ -261,32 +296,33 @@ Remaining:
 
 ## Phase 8 — Documentation and deliverables
 
-**Status: stale.**
+**Status: done.**
 
-1. `README.md` — claims "47 tests" and quotes the pre-audit numbers.
-2. `docs/architecture.md` — still says "StandardScaler + ordinal encoding".
-3. `docs/experiment-plan.md` — still says "all features are scaled together";
-   must state the covertype vs `standardize_all` rationale and the
-   no-silent-switching rule.
-4. `docs/api.md` — must document `repetitions` and `preprocessing_mode`.
-5. `docs/results/README.md` — replace the findings with the regenerated sweep.
-6. Regenerate `Thesis-KNN-PostgreSQL-Platform.docx` and `Project-Guide.docx`
-   through `docs/tools/build_thesis.py` / `build_guide.py`, then run
-   `verify_snippets.py`, which checks that every code block in the document
-   still matches the source file verbatim.
+1. `README.md` — test count (164), preprocessing description, repetition
+   semantics, conventional vs tie-aware Recall@K and the regenerated output.
+2. `docs/architecture.md` — preprocessing diagram corrected; index
+   build/reuse and repetition semantics documented.
+3. `docs/experiment-plan.md` — measurement contract, tie-aware metric,
+   expected observations stated as hypotheses, measured duplicate statistics.
+4. `docs/api.md` — `repetitions`, count fields, tie-aware recall, index
+   build/reuse fields and the `/repetitions` endpoint.
+5. `docs/results/README.md` — regenerated sweep, repetition-level dispersion,
+   tie-aware results, duplicate/tie measurements and corrected caveats.
+6. Both Word documents regenerated through `docs/tools/build_thesis.py` /
+   `build_guide.py`; `verify_snippets.py` reports zero divergent code blocks.
 
 **Acceptance check** — `verify_snippets.py` reports zero mismatches and no
-document contains a number that cannot be found in `docs/results/sweep.csv`.
+document contains a number that cannot be traced to `docs/results/*.csv`,
+`docs/results/*.json` or a persisted experiment row.
 
 ---
 
 ## Phase 9 — Verification and hand-over
 
-1. `pytest` — currently **123 passed**, 0 skipped, real PostgreSQL. Re-run
-   after the runner and doc changes.
+1. `pytest` — **164 passed**, 0 skipped, against real PostgreSQL + pgvector.
 2. Reproducibility checklist: fixed seed, fixed splits, fixed query set,
-   pinned library and database versions, `repetitions` stated, warm-cache
-   caveat stated.
+   dataset fingerprint, pinned library and database versions, `repetitions`
+   stated, warm-cache caveat stated, index reuse recorded.
 3. Final report: problems found, files changed and why, exact test output,
    Windows setup commands, sweep commands, remaining limitations.
 
@@ -294,18 +330,24 @@ document contains a number that cannot be found in `docs/results/sweep.csv`.
 
 ## Definition of done
 
-- [ ] `pytest` green with no skips on a machine with PostgreSQL + pgvector.
-- [ ] Every experiment row records method, `k`, metric, `ef_search`, plan
-      verification, repetitions, latency distribution, build time, index size
-      and environment.
-- [ ] Exact rows prove `Seq Scan`; HNSW rows prove the named index scan.
-- [ ] `sweep.csv` / `sweep.json` regenerated from the corrected pipeline.
+- [x] `pytest` green with no skips on a machine with PostgreSQL + pgvector.
+- [x] Every experiment row records method, `k`, metric, `ef_search`, plan
+      verification, repetitions, unique query count, total pool size, latency
+      distribution, build/reuse state, index size and environment.
+- [x] Exact rows prove `Seq Scan`; HNSW rows prove the named index scan.
+- [x] `sweep.csv` / `sweep.json` / `repetition_details.csv` /
+      `repetition_summary.csv` regenerated from the corrected pipeline.
+- [x] Conventional and tie-aware Recall@K both implemented, persisted and
+      reported; tie tolerance documented.
+- [x] Duplicate-vector and boundary-tie statistics measured for the pool and
+      recorded in `duplicate_stats.json`.
 - [ ] UI shows preprocessing mode, repetitions, applied `ef_search`, index
       size and plan verification, in EN and FA.
-- [ ] README, architecture, experiment plan, API doc and both `.docx` files
+- [x] README, architecture, experiment plan, API doc and both `.docx` files
       match the code.
-- [ ] Limitations stated honestly: warm cache, single machine,
-      per-query round-trip, class imbalance, Covertype-only primary dataset.
+- [x] Limitations stated honestly: warm cache, single machine,
+      per-query round-trip, class imbalance, Covertype-only primary dataset,
+      correlated repetitions, small query sample.
 
 ---
 
@@ -319,3 +361,8 @@ document contains a number that cannot be found in `docs/results/sweep.csv`.
 | `covertype` preprocessing is primary | Covertype's 44 indicators are already 0/1; standardising them destroys sparsity without benefit. `standardize_all` is an explicit, separately labelled comparison |
 | HNSW only | IVFFlat was removed as out of scope for the core project |
 | Repetitions over the same query set | A single pass cannot support percentile or speed-up claims |
+| Repetitions reuse the query order | The goal is run-to-run variability, not population sampling; independent resampling would change the estimand |
+| Both conventional and tie-aware Recall@K | Conventional reports id-level agreement; tie-aware isolates arbitrary boundary tie-breaking. Neither replaces the other |
+| Deterministic exact reference (`ORDER BY distance, id`) | Without an id tiebreak the K-th row is chosen arbitrarily and conventional recall is irreproducible |
+| Reused index has `index_build_ms = NULL` | A historical build is not a cost paid by the current `ef_search` row |
+| Dataset fingerprint stored per experiment | Row count alone does not identify the pool composition |

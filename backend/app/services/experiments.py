@@ -45,16 +45,25 @@ from app.services.classification import (
     latency_stats,
     majority_vote,
     recall_at_k,
+    repetition_summary,
+    tie_aware_recall_at_k,
 )
+from app.services.dataset_stats import dataset_fingerprint
 from app.services.metrics import DistanceMetric
 from app.services.preprocessing import PreprocessState
+from app.services.vector_store import TieTolerance
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ExperimentConfig:
-    """Configuration for a single experiment run."""
+    """Configuration for a single experiment run.
+
+    ``repetitions`` is the number of *complete* timed passes over the same
+    query set. It is not a multiplier applied to the recorded query count:
+    every pass really executes and every individual latency is persisted.
+    """
 
     dataset_id: int
     k: int = 5
@@ -68,6 +77,10 @@ class ExperimentConfig:
     weighted_voting: bool = False
     use_operator: bool = True
     repetitions: int = 1
+    seed: int = 0
+    force_rebuild_index: bool = False
+    tie_tolerance_relative: float = 1e-6
+    tie_tolerance_absolute: float = 1e-6
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -85,6 +98,10 @@ class ExperimentConfig:
             raise ValueError("ef_search is required for the HNSW method")
         if self.method == "hnsw" and self.ef_search < 1:
             raise ValueError(f"ef_search must be at least 1 (got {self.ef_search})")
+        if not 0.0 <= self.tie_tolerance_relative < 1.0:
+            raise ValueError("tie_tolerance_relative must be in [0, 1)")
+        if self.tie_tolerance_absolute < 0.0:
+            raise ValueError("tie_tolerance_absolute must be non-negative")
 
 
 def _load_test_vectors(dataset_id: int, limit: int | None) -> list[tuple[int, int, str]]:
@@ -92,7 +109,21 @@ def _load_test_vectors(dataset_id: int, limit: int | None) -> list[tuple[int, in
 
 
 def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
-    """Execute an experiment and persist its results."""
+    """Execute an experiment and persist its results.
+
+    Measurement contract:
+
+    * ``unique_queries`` queries are evaluated, chosen once from the held-out
+      pool (``total_test_pool`` is the size of that pool, not the number of
+      queries evaluated).
+    * Every query is executed ``repetitions`` times, so the persisted latency
+      row count is exactly ``repetitions * unique_queries``. The warm-up query
+      is executed and discarded before the first timed query, so it never
+      contributes a stored sample.
+    * Classification and recall metrics are computed **per repetition** from
+      that repetition's own neighbour sets, then summarised across
+      repetitions. They are not computed once and copied.
+    """
     started = time.perf_counter()
 
     dataset = fetch_one("SELECT * FROM datasets WHERE id = %s", (config.dataset_id,))
@@ -110,18 +141,39 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     y_true = [r[1] for r in rows]
 
     train_size = vs.count_vectors(config.dataset_id, "train")
+    total_test_pool = vs.count_vectors(config.dataset_id, "test")
 
     # --- Index preparation ------------------------------------------------
     index_build_ms: float | None = None
+    index_created_ms: float | None = None
+    index_reused: bool | None = None
+    index_reused_build_ms: float | None = None
     index_size: int | None = None
+    index_m: int | None = None
+    index_ef_construction: int | None = None
+
     if config.method == "hnsw":
-        index_build_ms = vs.create_hnsw_index(
+        info = vs.ensure_hnsw_index(
             config.dataset_id,
             config.distance_metric,
             m=config.hnsw_m,
             ef_construction=config.hnsw_ef_construction,
+            force=config.force_rebuild_index,
         )
-        index_size = vs.index_size_bytes(config.dataset_id)
+        # The live index's parameters are authoritative, not the Python
+        # defaults that were requested.
+        index_m = info.m
+        index_ef_construction = info.ef_construction
+        index_size = info.size_bytes
+        index_reused = not info.created
+        if info.created:
+            index_build_ms = info.build_ms
+            index_created_ms = info.build_ms
+        else:
+            # A reused index was not built during this run. Its historical
+            # build time is retained separately so it is never reported as a
+            # cost paid by this ef_search configuration.
+            index_reused_build_ms = info.build_ms
         vs.analyze(config.dataset_id)
     else:
         # The exact baseline uses the pgvector distance *function*, which the
@@ -129,16 +181,29 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         # therefore left in place - it simply cannot be used - which keeps a
         # following HNSW run from paying the rebuild cost again.
         vs.analyze(config.dataset_id)
+        existing = vs.get_hnsw_index(config.dataset_id)
+        if existing is not None:
+            index_m = int(existing["m"])
+            index_ef_construction = int(existing["ef_construction"])
 
-    # --- Ground truth (always exact) -------------------------------------
-    gt_ids = vs.ground_truth_ids(
-        query_vectors, config.k, config.distance_metric, config.dataset_id
+    # --- Ground truth (always exhaustive, tie-tolerant) --------------------
+    tolerance = TieTolerance(
+        relative=config.tie_tolerance_relative,
+        absolute=config.tie_tolerance_absolute,
     )
+    ground_truth = vs.ground_truth_candidates(
+        query_vectors,
+        config.k,
+        config.distance_metric,
+        config.dataset_id,
+        tolerance,
+    )
+    gt_ids = [g.ids for g in ground_truth]
+    gt_candidates = [g.candidate_ids for g in ground_truth]
+    tied_queries = sum(1 for g in ground_truth if g.is_tied)
+    max_tied_candidates = max((len(g.candidate_ids) for g in ground_truth), default=0)
 
-    # --- Retrieval under test --------------------------------------------
-    # The same query vectors, in the same order, are used for both arms of
-    # every comparison. Repetitions repeat the whole timed sweep so that the
-    # reported percentiles are not dominated by a single noisy sample.
+    # --- Retrieval under test ---------------------------------------------
     batch = vs.retrieve_batch(
         query_vectors,
         k=config.k,
@@ -148,35 +213,72 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         ef_search=config.ef_search,
         repetitions=config.repetitions,
     )
-    results = batch.results
 
-    retrieved_ids = [[n.row_id for n in r.neighbours] for r in results]
-    latencies = batch.latencies
+    # --- Metrics per repetition -------------------------------------------
+    per_repetition: list[dict[str, Any]] = []
+    last_metrics: ClassificationMetrics | None = None
 
-    # The same voting implementation for both arms.
-    y_pred = [
-        majority_vote(
-            [n.label for n in r.neighbours],
-            [n.distance for n in r.neighbours],
-            weighted=config.weighted_voting,
+    for index, rep_results in enumerate(batch.repetition_results):
+        retrieved = [[n.row_id for n in r.neighbours] for r in rep_results]
+        y_pred = [
+            majority_vote(
+                [n.label for n in r.neighbours],
+                [n.distance for n in r.neighbours],
+                weighted=config.weighted_voting,
+            )
+            for r in rep_results
+        ]
+        metrics = evaluate_predictions(y_true, y_pred, class_labels)
+        last_metrics = metrics
+        rep_lat = latency_stats(batch.repetition_latencies[index])
+
+        per_repetition.append(
+            {
+                "repetition": index + 1,
+                "unique_queries": len(retrieved),
+                "samples": len(batch.repetition_latencies[index]),
+                "latency_avg_ms": rep_lat["avg"],
+                "latency_p50_ms": rep_lat["p50"],
+                "latency_p95_ms": rep_lat["p95"],
+                "latency_p99_ms": rep_lat["p99"],
+                "recall_at_k": recall_at_k(retrieved, gt_ids),
+                "tie_aware_recall_at_k": tie_aware_recall_at_k(
+                    retrieved, gt_candidates
+                ),
+                "accuracy": metrics.accuracy,
+                "precision_macro": metrics.precision_macro,
+                "recall_macro": metrics.recall_macro,
+                "macro_f1": metrics.macro_f1,
+            }
         )
-        for r in results
-    ]
 
-    metrics: ClassificationMetrics = evaluate_predictions(y_true, y_pred, class_labels)
-    recall = recall_at_k(retrieved_ids, gt_ids)
-    lat = latency_stats(latencies)
+    if last_metrics is None:  # pragma: no cover - guarded by repetitions >= 1
+        raise RuntimeError("No repetition was executed")
+
+    # Latency percentiles come from every measured observation, not from a
+    # per-repetition average.
+    lat = latency_stats(batch.latencies)
+
+    summary_keys = (
+        "accuracy",
+        "precision_macro",
+        "recall_macro",
+        "macro_f1",
+        "recall_at_k",
+        "tie_aware_recall_at_k",
+    )
+    summaries = {
+        key: repetition_summary([rep[key] for rep in per_repetition])
+        for key in summary_keys
+    }
 
     used_index = batch.used_index_scan
     used_seq_scan = batch.used_sequential_scan
     applied_ef = batch.applied_ef_search
 
     total_runtime = time.perf_counter() - started
-
-    # The database query time is the sum of the measured per-query latencies;
-    # everything else (ground truth, classification, persistence, HTTP
-    # overhead) is reported separately so the two are never conflated.
-    measured_query_time_s = sum(latencies) / 1000.0
+    measured_query_time_s = sum(batch.latencies) / 1000.0
+    fingerprint = dataset_fingerprint(config.dataset_id)
 
     payload = {
         "dataset_id": config.dataset_id,
@@ -185,17 +287,34 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         "k": config.k,
         "distance_metric": config.distance_metric.value,
         "hnsw_ef_search": config.ef_search,
-        "hnsw_m": config.hnsw_m if config.method == "hnsw" else None,
+        "hnsw_m": index_m,
+        "hnsw_ef_construction": index_ef_construction,
         "train_size": train_size,
         "test_size": len(query_vectors),
+        "unique_queries": len(query_vectors),
+        "total_test_pool": total_test_pool,
         "index_build_ms": index_build_ms,
+        "index_created_ms": index_created_ms,
+        "index_reused": index_reused,
+        "index_reused_build_ms": index_reused_build_ms,
         "index_size_bytes": index_size,
         "repetitions": config.repetitions,
-        "recall_at_k": recall,
-        "accuracy": metrics.accuracy,
-        "macro_f1": metrics.macro_f1,
-        "precision_macro": metrics.precision_macro,
-        "recall_macro": metrics.recall_macro,
+        "recall_at_k": summaries["recall_at_k"]["mean"],
+        "tie_aware_recall_at_k": summaries["tie_aware_recall_at_k"]["mean"],
+        "tied_queries": tied_queries,
+        "max_tied_candidates": max_tied_candidates,
+        "accuracy": summaries["accuracy"]["mean"],
+        "macro_f1": summaries["macro_f1"]["mean"],
+        "precision_macro": summaries["precision_macro"]["mean"],
+        "recall_macro": summaries["recall_macro"]["mean"],
+        "accuracy_std": summaries["accuracy"]["sd"],
+        "macro_f1_std": summaries["macro_f1"]["sd"],
+        "recall_at_k_std": summaries["recall_at_k"]["sd"],
+        "tie_aware_recall_at_k_std": summaries["tie_aware_recall_at_k"]["sd"],
+        "dataset_fingerprint": fingerprint,
+        "seed": config.seed,
+        "tie_tolerance_rel": tolerance.relative,
+        "tie_tolerance_abs": tolerance.absolute,
         "latency_avg_ms": lat["avg"],
         "latency_p50_ms": lat["p50"],
         "latency_p95_ms": lat["p95"],
@@ -210,15 +329,22 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
                 **capture_environment(),
                 "applied_ef_search": applied_ef,
                 "used_sequential_scan": used_seq_scan,
-                "measured_queries": len(latencies),
+                "measured_queries": batch.sample_count,
+                "unique_queries": batch.unique_query_count,
                 "repetitions": config.repetitions,
                 "warmup_queries": batch.warmup_queries,
                 "preprocessing_mode": state.mode,
                 "preprocessing_dimension": state.dimension,
+                "total_test_pool": total_test_pool,
+                "dataset_fingerprint": fingerprint,
+                "seed": config.seed,
+                "repetition_query_order": "identical order across repetitions",
+                "plan_verified": bool(batch.plan),
+                "index_reused": index_reused,
             }
         ),
-        "confusion_matrix": json.dumps(metrics.confusion_matrix),
-        "per_class_metrics": json.dumps(metrics.per_class),
+        "confusion_matrix": json.dumps(last_metrics.confusion_matrix),
+        "per_class_metrics": json.dumps(last_metrics.per_class),
         "config": json.dumps(
             {
                 **asdict(config),
@@ -231,22 +357,27 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     }
 
     experiment_id = _insert_experiment(payload)
+    _insert_repetitions(experiment_id, per_repetition)
     _insert_latencies(experiment_id, batch)
 
     logger.info(
-        "Experiment %s done: method=%s k=%s ef=%s acc=%.4f recall@%s=%.4f "
-        "p50=%.3fms n=%d reps=%d idx=%s",
+        "Experiment %s done: method=%s k=%s ef=%s unique_queries=%s reps=%s "
+        "samples=%s recall@%s=%.4f tie_aware=%.4f acc=%.4f p50=%.3fms idx=%s "
+        "reused=%s",
         experiment_id,
         config.method,
         config.k,
         config.ef_search,
-        metrics.accuracy,
-        config.k,
-        recall,
-        lat["p50"],
-        len(latencies),
+        batch.unique_query_count,
         config.repetitions,
+        batch.sample_count,
+        config.k,
+        summaries["recall_at_k"]["mean"],
+        summaries["tie_aware_recall_at_k"]["mean"],
+        summaries["accuracy"]["mean"],
+        lat["p50"],
         used_index,
+        index_reused,
     )
 
     return {
@@ -256,8 +387,10 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
             for key, value in payload.items()
             if key not in {"confusion_matrix", "per_class_metrics", "config", "environment"}
         },
-        "confusion_matrix": metrics.confusion_matrix,
-        "per_class_metrics": metrics.per_class,
+        "confusion_matrix": last_metrics.confusion_matrix,
+        "per_class_metrics": last_metrics.per_class,
+        "plan": batch.plan,
+        "per_repetition": per_repetition,
     }
 
 
@@ -274,34 +407,79 @@ def _insert_experiment(payload: dict[str, Any]) -> int:
             return int(row["id"])
 
 
+def _insert_repetitions(experiment_id: int, per_repetition: list[dict[str, Any]]) -> None:
+    """Persist one row per (experiment, repetition)."""
+    if not per_repetition:
+        return
+
+    columns = (
+        "experiment_id, repetition, unique_queries, samples, "
+        "latency_avg_ms, latency_p50_ms, latency_p95_ms, latency_p99_ms, "
+        "recall_at_k, tie_aware_recall_at_k, accuracy, precision_macro, "
+        "recall_macro, macro_f1"
+    )
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                f"INSERT INTO experiment_repetitions ({columns}) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                [
+                    (
+                        experiment_id,
+                        int(rep["repetition"]),
+                        int(rep["unique_queries"]),
+                        int(rep["samples"]),
+                        rep["latency_avg_ms"],
+                        rep["latency_p50_ms"],
+                        rep["latency_p95_ms"],
+                        rep["latency_p99_ms"],
+                        rep["recall_at_k"],
+                        rep["tie_aware_recall_at_k"],
+                        rep["accuracy"],
+                        rep["precision_macro"],
+                        rep["recall_macro"],
+                        rep["macro_f1"],
+                    )
+                    for rep in per_repetition
+                ],
+            )
+
+
 def _insert_latencies(experiment_id: int, batch) -> None:
     """Persist every measured latency sample.
 
-    One row is written per sample, so a run with ``repetitions`` repeats of
-    ``n`` queries stores ``repetitions * n`` rows. The ``query_index`` records
-    which query produced the sample, and the retrieved identifiers are those
-    of the final repetition for that query.
+    One row is written per sample, so an experiment with ``repetitions``
+    passes over ``n`` queries stores exactly ``repetitions * n`` rows. The
+    ``repetition`` column records which pass produced the sample and
+    ``query_index`` records which query. The warm-up query is not part of any
+    pass and is therefore never stored.
     """
-    results = batch.results
-    per_query = len(results)
-    if not per_query:
+    rows: list[tuple] = []
+    for repetition, (results, latencies) in enumerate(
+        zip(batch.repetition_results, batch.repetition_latencies), start=1
+    ):
+        for query_index, (result, latency) in enumerate(zip(results, latencies)):
+            rows.append(
+                (
+                    experiment_id,
+                    repetition,
+                    query_index,
+                    float(latency),
+                    json.dumps([n.row_id for n in result.neighbours]),
+                )
+            )
+
+    if not rows:
         return
 
     with connection() as conn:
         with conn.cursor() as cur:
-            for sample_index, latency in enumerate(batch.latencies):
-                query_index = sample_index % per_query
-                cur.execute(
-                    "INSERT INTO query_latencies "
-                    "(experiment_id, query_index, latency_ms, retrieved_ids) "
-                    "VALUES (%s, %s, %s, %s::jsonb)",
-                    (
-                        experiment_id,
-                        query_index,
-                        latency,
-                        json.dumps([n.row_id for n in results[query_index].neighbours]),
-                    ),
-                )
+            cur.executemany(
+                "INSERT INTO query_latencies "
+                "(experiment_id, repetition, query_index, latency_ms, retrieved_ids) "
+                "VALUES (%s, %s, %s, %s, %s::jsonb)",
+                rows,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +506,9 @@ def compare_experiments(exact_id: int, approx_id: int) -> dict[str, Any]:
             "recall_macro": delta(exact["recall_macro"], approx["recall_macro"]),
             "macro_f1": delta(exact["macro_f1"], approx["macro_f1"]),
             "recall_at_k": delta(exact["recall_at_k"], approx["recall_at_k"]),
+            "tie_aware_recall_at_k": delta(
+                exact["tie_aware_recall_at_k"], approx["tie_aware_recall_at_k"]
+            ),
             "latency_avg_ms": delta(exact["latency_avg_ms"], approx["latency_avg_ms"]),
             "latency_p50_ms": delta(exact["latency_p50_ms"], approx["latency_p50_ms"]),
             "latency_p95_ms": delta(exact["latency_p95_ms"], approx["latency_p95_ms"]),
@@ -338,6 +519,15 @@ def compare_experiments(exact_id: int, approx_id: int) -> dict[str, Any]:
             ),
         },
     }
+
+
+def get_repetitions(experiment_id: int) -> list[dict[str, Any]]:
+    """Per-repetition measurement rows for one experiment."""
+    return fetch_all(
+        "SELECT * FROM experiment_repetitions WHERE experiment_id = %s "
+        "ORDER BY repetition",
+        (experiment_id,),
+    )
 
 
 def _serialize_experiment(row: dict) -> dict[str, Any]:

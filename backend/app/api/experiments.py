@@ -13,6 +13,7 @@ from app.services.experiments import (
     compare_experiments,
     delete_experiment,
     get_experiment,
+    get_repetitions,
     list_experiments,
     run_experiment,
 )
@@ -77,28 +78,44 @@ def remove(experiment_id: int) -> dict:
 @router.get("/{experiment_id}/latencies")
 def latency_samples(experiment_id: int, limit: int = 5_000) -> dict:
     rows = fetch_all(
-        "SELECT query_index, latency_ms FROM query_latencies "
-        "WHERE experiment_id = %s ORDER BY query_index LIMIT %s",
+        "SELECT repetition, query_index, latency_ms FROM query_latencies "
+        "WHERE experiment_id = %s ORDER BY repetition, query_index LIMIT %s",
         (experiment_id, limit),
     )
     values = [float(r["latency_ms"]) for r in rows]
     if not values:
-        return {"experiment_id": experiment_id, "samples": [], "count": 0}
+        return {
+            "experiment_id": experiment_id,
+            "samples": [],
+            "count": 0,
+            "repetitions": 0,
+            "unique_queries": 0,
+        }
 
     ordered = sorted(values)
     def pct(p: float) -> float:
         idx = min(len(ordered) - 1, max(0, int(round((p / 100) * (len(ordered) - 1)))))
         return ordered[idx]
 
+    repetitions = len({int(r["repetition"]) for r in rows})
     return {
         "experiment_id": experiment_id,
         "count": len(values),
+        "repetitions": repetitions,
+        "unique_queries": len(values) // repetitions if repetitions else 0,
         "samples": values,
         "p50": pct(50),
         "p90": pct(90),
         "p95": pct(95),
         "p99": pct(99),
     }
+
+
+@router.get("/{experiment_id}/repetitions")
+def repetitions(experiment_id: int) -> dict:
+    """Per-repetition metrics (one row per complete timed pass)."""
+    rows = get_repetitions(experiment_id)
+    return {"experiment_id": experiment_id, "repetitions": rows, "count": len(rows)}
 
 
 @router.get("/{experiment_id}/explain")

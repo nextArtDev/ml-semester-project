@@ -110,6 +110,7 @@ Runs one experiment.
   "hnsw_m": 16,
   "hnsw_ef_construction": 64,
   "max_queries": 2000,
+  "repetitions": 3,
   "name": "HNSW ef=100 k=5",
   "weighted_voting": false
 }
@@ -124,8 +125,14 @@ Runs one experiment.
 | `ef_search` | int \| null | `hnsw.ef_search`, 1–1000. Query-time only. |
 | `hnsw_m` | int | Build parameter — changing it forces an index rebuild |
 | `hnsw_ef_construction` | int | Build parameter |
-| `max_queries` | int \| null | Number of test vectors to query |
+| `max_queries` | int \| null | Number of unique test vectors to query |
+| `repetitions` | int | Complete timed passes over that query set, 1–100 |
 | `weighted_voting` | bool | Distance-weighted majority voting |
+
+`repetitions` is not a counter multiplier: the whole query set is executed
+`repetitions` times and every latency is stored. A request with
+`max_queries = 2000` and `repetitions = 3` stores 6,000 `query_latencies` rows
+and 3 `experiment_repetitions` rows. One warm-up query is discarded.
 
 Response (abridged):
 
@@ -136,10 +143,23 @@ Response (abridged):
   "k": 5,
   "distance_metric": "l2",
   "hnsw_ef_search": 100,
+  "hnsw_m": 16,
+  "hnsw_ef_construction": 64,
   "train_size": 15001,
   "test_size": 300,
-  "index_build_ms": 1973.4,
+  "unique_queries": 300,
+  "total_test_pool": 3000,
+  "repetitions": 3,
+  "index_build_ms": null,
+  "index_created_ms": null,
+  "index_reused": true,
+  "index_reused_build_ms": 1973.4,
+  "index_size_bytes": 5234688,
+  "dataset_fingerprint": "6baa8fa283ea5a8267d3e964eedf5d2a",
+  "seed": 0,
   "recall_at_k": 0.9527,
+  "tie_aware_recall_at_k": 0.9527,
+  "tied_queries": 0,
   "accuracy": 0.7633,
   "macro_f1": 0.4861,
   "latency_avg_ms": 0.379,
@@ -151,9 +171,18 @@ Response (abridged):
 }
 ```
 
-> The `index_build_ms` value is the duration of the build that actually ran.
-> When an existing index with the same parameters is reused, the original
-> build time is reported instead.
+> `index_build_ms` is the duration of a build that actually ran during the
+> request. When an index with the same metric and build parameters is reused
+> it is `null`, `index_reused` is `true`, and the historical duration is in
+> `index_reused_build_ms`. The reported `hnsw_m` / `hnsw_ef_construction` come
+> from the live index, not from the request defaults.
+
+### `GET /api/experiments/{id}/repetitions`
+
+One row per complete timed pass, including that pass's sample count, latency
+distribution, conventional and tie-aware Recall@K, accuracy, macro precision,
+macro recall and macro F1. These are the rows behind
+`repetition_details.csv`.
 
 ### `GET /api/experiments`
 
@@ -193,7 +222,9 @@ Per-query latency samples with percentile summary.
 ```json
 {
   "experiment_id": 15,
-  "count": 300,
+  "count": 900,
+  "repetitions": 3,
+  "unique_queries": 300,
   "samples": [0.21, 0.19, "..."],
   "p50": 0.3746,
   "p90": 0.42,
@@ -201,6 +232,11 @@ Per-query latency samples with percentile summary.
   "p99": 0.51
 }
 ```
+
+`count` is the number of stored observations (`unique_queries × repetitions`
+when the limit is not reached), and `unique_queries` is derived from the
+distinct repetition numbers. The samples are ordered by repetition and query
+index, so a client can separate the passes if needed.
 
 ### `GET /api/experiments/{id}/explain`
 
