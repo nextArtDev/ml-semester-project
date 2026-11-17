@@ -606,70 +606,85 @@ def build_database(doc) -> None:
             [
                 "Configuration",
                 "retrieval_method, k, distance_metric, hnsw_ef_search, "
-                "hnsw_m, hnsw_lists",
+                "hnsw_m, hnsw_ef_construction, repetitions, seed",
                 "Everything needed to reproduce the run",
             ],
             [
                 "Scale",
-                "train_size, test_size",
-                "The size of the pools that were queried",
+                "train_size, test_size, unique_queries, total_test_pool",
+                "Pool sizes and the number of distinct queries evaluated",
+            ],
+            [
+                "Provenance",
+                "dataset_fingerprint, tie_tolerance_rel, tie_tolerance_abs",
+                "Which exact pool composition was measured, and the tie tolerance",
             ],
             [
                 "Retrieval quality",
-                "recall_at_k",
-                "Overlap with the exact ground-truth neighbour set",
+                "recall_at_k, tie_aware_recall_at_k, tied_queries, "
+                "max_tied_candidates, *_std",
+                "Conventional and tie-aware overlap with the exact reference",
             ],
             [
                 "Classification",
-                "accuracy, macro_f1, precision_macro, recall_macro",
+                "accuracy, macro_f1, precision_macro, recall_macro, "
+                "accuracy_std, macro_f1_std",
                 "The downstream effect of the retrieval",
             ],
             [
                 "Performance",
-                "latency_avg_ms, latency_p50_ms, latency_p95_ms, latency_p99_ms",
-                "Per-query latency distribution",
+                "latency_avg_ms, latency_p50_ms, latency_p95_ms, latency_p99_ms, "
+                "latency_min_ms, latency_max_ms",
+                "Per-query latency distribution over every stored observation",
             ],
             [
                 "Index",
-                "index_build_ms, used_index_scan",
-                "The cost of the index and proof that it was used",
+                "index_build_ms, index_created_ms, index_reused, "
+                "index_reused_build_ms, index_size_bytes, used_index_scan",
+                "Fresh build cost, reuse state and proof the index was used",
             ],
             [
                 "Diagnostics",
-                "confusion_matrix, per_class_metrics, config",
+                "confusion_matrix, per_class_metrics, config, environment",
                 "JSONB detail for inspection and plotting",
             ],
             [
                 "Timing",
-                "total_runtime_s",
-                "Wall-clock duration of the whole run",
+                "total_runtime_s, api_overhead_s",
+                "Wall-clock duration of the whole run and of non-query work",
             ],
         ],
         widths=[2.8, 7.2, 5.5],
     )
     p(
         doc,
-        "The used_index_scan column deserves emphasis. It records whether the "
-        "planner actually chose an HNSW index scan for the measured query. "
-        "Without it, a run in which the planner silently reverted to a "
-        "sequential scan would be indistinguishable from a legitimate "
-        "approximate result, and would quietly corrupt the comparison.",
+        "Two column groups deserve emphasis. used_index_scan records whether the "
+        "planner actually chose an HNSW index scan for the measured query; "
+        "without it, a silent fallback to a sequential scan would be "
+        "indistinguishable from a legitimate approximate result. The "
+        "index_build_ms / index_reused / index_reused_build_ms trio separates a "
+        "build that happened during this run from a historical build that is "
+        "being reused: on a reused index the current build time is NULL and the "
+        "historical duration lives in index_reused_build_ms.",
     )
 
     h3(doc, "3.2.3 query_latencies")
     p(
         doc,
-        "One row per measured query: the experiment id, the query index, the "
-        "latency in milliseconds and the identifiers that were retrieved. "
-        "Storing the individual samples rather than only the summary "
-        "percentiles is what allows the interface to draw a latency histogram "
-        "and to report the p90, which the summary table does not include.",
+        "One row per measured query, per repetition: the experiment id, the "
+        "repetition number, the query index, the latency in milliseconds and "
+        "the identifiers that were retrieved. Storing the individual samples "
+        "rather than only the summary percentiles is what allows the interface "
+        "to draw a latency histogram, to report the p90, and to compute a "
+        "between-repetition spread. The (experiment_id, repetition, query_index) "
+        "triple identifies a sample uniquely.",
     )
     code(
         doc,
         "CREATE TABLE IF NOT EXISTS query_latencies (\n"
         "    id            BIGSERIAL PRIMARY KEY,\n"
         "    experiment_id BIGINT      NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,\n"
+        "    repetition    INTEGER     NOT NULL DEFAULT 1,\n"
         "    query_index   INTEGER     NOT NULL,\n"
         "    latency_ms    DOUBLE PRECISION NOT NULL,\n"
         "    retrieved_ids JSONB       NOT NULL DEFAULT '[]'::jsonb\n"
@@ -677,7 +692,41 @@ def build_database(doc) -> None:
         caption="Listing 9 — The per-query latency table.",
     )
 
-    h3(doc, "3.2.4 hnsw_indexes")
+    h3(doc, "3.2.4 experiment_repetitions")
+    p(
+        doc,
+        "One row per experiment and repetition, holding that pass's latency "
+        "distribution and its quality metrics. A repetition is a complete timed "
+        "pass over the whole query set, so its recall and accuracy describe that "
+        "pass rather than an average over all latency samples. These rows are "
+        "what make the between-repetition spread measurable, and they are "
+        "written from the measured neighbour sets rather than recomputed from "
+        "the aggregate.",
+    )
+    code(
+        doc,
+        "CREATE TABLE IF NOT EXISTS experiment_repetitions (\n"
+        "    id                   BIGSERIAL PRIMARY KEY,\n"
+        "    experiment_id        BIGINT      NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,\n"
+        "    repetition           INTEGER     NOT NULL,\n"
+        "    unique_queries       INTEGER     NOT NULL,\n"
+        "    samples              INTEGER     NOT NULL,\n"
+        "    latency_avg_ms       DOUBLE PRECISION,\n"
+        "    latency_p50_ms       DOUBLE PRECISION,\n"
+        "    latency_p95_ms       DOUBLE PRECISION,\n"
+        "    latency_p99_ms       DOUBLE PRECISION,\n"
+        "    recall_at_k          DOUBLE PRECISION,\n"
+        "    tie_aware_recall_at_k DOUBLE PRECISION,\n"
+        "    accuracy             DOUBLE PRECISION,\n"
+        "    precision_macro      DOUBLE PRECISION,\n"
+        "    recall_macro         DOUBLE PRECISION,\n"
+        "    macro_f1             DOUBLE PRECISION,\n"
+        "    UNIQUE (experiment_id, repetition)\n"
+        ");",
+        caption="Listing 10 — The per-repetition result table.",
+    )
+
+    h3(doc, "3.2.5 hnsw_indexes")
     p(
         doc,
         "A registry that records the metric and build parameters of the index "
@@ -694,9 +743,10 @@ def build_database(doc) -> None:
         "    m               INTEGER     NOT NULL,\n"
         "    ef_construction INTEGER     NOT NULL,\n"
         "    build_ms        DOUBLE PRECISION,\n"
+        "    size_bytes      BIGINT,\n"
         "    built_at        TIMESTAMPTZ NOT NULL DEFAULT now()\n"
         ");",
-        caption="Listing 10 — The HNSW index registry.",
+        caption="Listing 11 — The HNSW index registry.",
     )
 
     h2(doc, "3.3 The Per-Dataset Vector Tables")
@@ -715,7 +765,7 @@ def build_database(doc) -> None:
         "    embedding vector(54) NOT NULL\n"
         ");\n"
         "CREATE INDEX fv_1_row_idx ON fv_1 (row_index);",
-        caption="Listing 11 — The training-pool table for a 54-dimensional dataset, as created in the database.",
+        caption="Listing 12 — The training-pool table for a 54-dimensional dataset, as created in the database.",
     )
     table(
         doc,
@@ -757,7 +807,7 @@ def build_database(doc) -> None:
         doc,
         "CREATE INDEX fv_embedding_hnsw_idx ON fv USING hnsw (embedding vector_l2_ops);\n"
         "ERROR:  column does not have dimensions",
-        caption="Listing 12 — The error that forces a dimensionally-typed column.",
+        caption="Listing 13 — The error that forces a dimensionally-typed column.",
     )
     p(
         doc,
@@ -788,7 +838,7 @@ def build_database(doc) -> None:
         "CREATE INDEX fv_1_embedding_hnsw_idx ON fv_1\n"
         "    USING hnsw (embedding vector_l2_ops)\n"
         "    WITH (m = 16, ef_construction = 64);",
-        caption="Listing 13 — The statement the platform issues to build the index, as recorded by PostgreSQL.",
+        caption="Listing 14 — The statement the platform issues to build the index, as recorded by PostgreSQL.",
     )
     table(
         doc,
@@ -824,7 +874,7 @@ def build_database(doc) -> None:
     p(
         doc,
         "Changing m or ef_construction requires a rebuild; changing ef_search "
-        "does not. The registry table in Section 3.2.4 exists so that the "
+        "does not. The registry table in Section 3.2.5 exists so that the "
         "platform can tell the difference and reuse the index whenever the "
         "build parameters are unchanged.",
     )
@@ -890,7 +940,7 @@ def build_backend(doc) -> None:
         "    yield\n"
         "    close_pool()\n"
         "    logger.info(\"Backend shut down\")",
-        caption="Listing 14 — The lifespan handler.",
+        caption="Listing 15 — The lifespan handler.",
     )
     p(
         doc,
@@ -989,7 +1039,7 @@ def build_backend(doc) -> None:
         "    state.label_to_index = {int(k): int(v) for k, v in state.label_to_index.items()}\n"
         "    state.class_labels = [int(v) for v in state.class_labels]\n"
         "    return state",
-        caption="Listing 15 — Deserialising the preprocessing state.",
+        caption="Listing 16 — Deserialising the preprocessing state.",
     )
     h3(doc, "4.3.2 A Note on Label Encoding")
     p(
@@ -1079,7 +1129,7 @@ def build_backend(doc) -> None:
         "                    )\n"
         "                )\n"
         "    logger.info(\"Created vector tables for dataset %s (dim=%s)\", dataset_id, dim)",
-        caption="Listing 16 — Creating the vector tables with a typed dimension.",
+        caption="Listing 17 — Creating the vector tables with a typed dimension.",
     )
     p(
         doc,
@@ -1124,7 +1174,7 @@ def build_backend(doc) -> None:
         "                    copy.write_row((int(idx), int(lab), emb))\n"
         "    logger.info(\"Inserted %s rows into %s\", len(labels), table)\n"
         "    return len(labels)",
-        caption="Listing 17 — Bulk-loading vectors with COPY.",
+        caption="Listing 18 — Bulk-loading vectors with COPY.",
     )
     p(
         doc,
@@ -1148,10 +1198,16 @@ def build_backend(doc) -> None:
                 "Drops the index for a dataset",
             ],
             [
+                "ensure_hnsw_index",
+                "(dataset_id, metric, m, ef_construction, force) -> IndexInfo",
+                "Builds the index or reuses a compatible one, and reports "
+                "which of the two happened",
+            ],
+            [
                 "create_hnsw_index",
                 "(dataset_id, metric, m, ef_construction, force) -> float",
-                "Builds the index and returns the build time in milliseconds, "
-                "or reuses an existing compatible index",
+                "Backward-compatible wrapper returning the build time, or 0.0 "
+                "when the index was reused",
             ],
             [
                 "get_hnsw_index",
@@ -1164,6 +1220,11 @@ def build_backend(doc) -> None:
                 "Checks pg_indexes for the physical index",
             ],
             [
+                "index_size_bytes",
+                "(dataset_id) -> int | None",
+                "Reads pg_relation_size for the live index",
+            ],
+            [
                 "analyze",
                 "(dataset_id)",
                 "Refreshes planner statistics on both tables",
@@ -1173,11 +1234,13 @@ def build_backend(doc) -> None:
     )
     p(
         doc,
-        "create_hnsw_index is the function that contains the reuse logic. It "
+        "ensure_hnsw_index is the function that contains the reuse logic. It "
         "consults the registry table and, if the metric and build parameters "
-        "match, returns the recorded build time without rebuilding anything. "
-        "This is what makes an ef_search sweep affordable: the index is built "
-        "once and then reused for every value in the sweep.",
+        "match and the physical index is still present, returns an IndexInfo "
+        "with created = False. Otherwise it builds the index and returns "
+        "created = True with the measured duration. The returned parameters are "
+        "read back from the live index rather than copied from the Python "
+        "defaults, so a persisted row describes what PostgreSQL actually built.",
     )
     code(
         doc,
@@ -1188,10 +1251,18 @@ def build_backend(doc) -> None:
         "    and existing[\"distance_metric\"] == metric.value\n"
         "    and int(existing[\"m\"]) == int(m)\n"
         "    and int(existing[\"ef_construction\"]) == int(ef_construction)\n"
+        "    and hnsw_index_exists(dataset_id)\n"
         "):\n"
         "    logger.info(\"Reusing existing HNSW index for dataset %s\", dataset_id)\n"
-        "    return float(existing[\"build_ms\"] or 0.0)",
-        caption="Listing 18 — The index reuse check.",
+        "    return IndexInfo(\n"
+        "        created=False,\n"
+        "        build_ms=float(existing[\"build_ms\"]) if existing[\"build_ms\"] is not None else None,\n"
+        "        m=int(existing[\"m\"]),\n"
+        "        ef_construction=int(existing[\"ef_construction\"]),\n"
+        "        size_bytes=index_size_bytes(dataset_id),\n"
+        "        distance_metric=str(existing[\"distance_metric\"]),\n"
+        "    )",
+        caption="Listing 19 — The index reuse check.",
     )
     note(
         doc,
@@ -1214,7 +1285,7 @@ def build_backend(doc) -> None:
         "    if use_operator:\n"
         "        return sql.SQL(\"embedding {} %s\").format(sql.SQL(metric.operator))\n"
         "    return sql.SQL(\"{} (embedding, %s::vector)\").format(sql.SQL(metric.function))",
-        caption="Listing 19 — Choosing between the operator form and the function form.",
+        caption="Listing 20 — Choosing between the operator form and the function form.",
     )
     p(
         doc,
@@ -1236,7 +1307,7 @@ def build_backend(doc) -> None:
         "        \"ORDER BY {dist} \"\n"
         "        \"LIMIT {k}\"\n"
         "    ).format(dist=dist, t=sql.Identifier(train_table(dataset_id)), k=sql.Literal(k))",
-        caption="Listing 20 — The retrieval query builder.",
+        caption="Listing 21 — The retrieval query builder.",
     )
 
     h3(doc, "4.5.6 retrieve() — The Measured Function")
@@ -1251,6 +1322,7 @@ def build_backend(doc) -> None:
         "    ef_search: int | None = None,\n"
         "    use_operator: bool = True,\n"
         "    warmup: bool = True,\n"
+        "    verify_plan: bool = True,\n"
         ") -> RetrievalResult:\n"
         "    \"\"\"Run a single nearest-neighbour query and time it.\n"
         "\n"
@@ -1258,16 +1330,25 @@ def build_backend(doc) -> None:
         "    satisfied by an index and therefore guarantees an exhaustive scan.\n"
         "    ``method='hnsw'`` uses the *operator* form so the planner can choose an\n"
         "    HNSW index scan.\n"
+        "\n"
+        "    The search-effort parameter is set at *session* level rather than with\n"
+        "    ``SET LOCAL``, because the connection pool runs in autocommit mode where\n"
+        "    ``SET LOCAL`` is silently discarded. The value is read back from the\n"
+        "    server to confirm that it was actually applied, and it is restored in a\n"
+        "    ``finally`` block so that a pooled connection never leaks the setting\n"
+        "    into a later request.\n"
         "    \"\"\"\n"
         "    use_op = method == \"hnsw\" and use_operator\n"
+        "    applied_ef: int | None = None\n"
         "\n"
         "    with connection() as conn:\n"
         "        with conn.cursor() as cur:\n"
-        "            # The pool runs in autocommit mode, where SET LOCAL is a no-op,\n"
-        "            # so the search-effort parameter is set at session level and\n"
-        "            # explicitly restored afterwards.\n"
         "            if ef_search is not None:\n"
         "                cur.execute(f\"SET hnsw.ef_search = {int(ef_search)}\")\n"
+        "                # Confirm the server actually took the value.\n"
+        "                cur.execute(\"SHOW hnsw.ef_search\")\n"
+        "                row = cur.fetchone()\n"
+        "                applied_ef = int(row[\"hnsw.ef_search\"]) if row else None\n"
         "            try:\n"
         "                stmt = _query_sql(dataset_id, metric, k, use_op)\n"
         "                params: tuple = (query_vector, query_vector)\n"
@@ -1285,10 +1366,12 @@ def build_backend(doc) -> None:
         "\n"
         "                plan = \"\"\n"
         "                used_index = False\n"
-        "                if method == \"hnsw\":\n"
+        "                used_seq_scan = False\n"
+        "                if verify_plan:\n"
         "                    cur.execute(_explain_sql(dataset_id, metric, k, use_op), params)\n"
         "                    plan = \"\\n\".join(r[\"QUERY PLAN\"] for r in cur.fetchall())\n"
-        "                    used_index = plan_uses_index_scan(plan)\n"
+        "                    used_index = plan_uses_index_scan(plan, index_name(dataset_id))\n"
+        "                    used_seq_scan = plan_uses_sequential_scan(plan)\n"
         "            finally:\n"
         "                if ef_search is not None:\n"
         "                    cur.execute(\"RESET hnsw.ef_search\")\n"
@@ -1306,12 +1389,14 @@ def build_backend(doc) -> None:
         "        latency_ms=elapsed_ms,\n"
         "        used_index_scan=used_index,\n"
         "        plan=plan,\n"
+        "        used_sequential_scan=used_seq_scan,\n"
+        "        applied_ef_search=applied_ef,\n"
         "    )",
-        caption="Listing 21 — The measured retrieval function, in full.",
+        caption="Listing 22 — The measured retrieval function, in full.",
     )
     p(
         doc,
-        "Five decisions in this function carry the experimental validity:",
+        "Seven decisions in this function carry the experimental validity:",
     )
     numbered(
         doc,
@@ -1335,6 +1420,18 @@ def build_backend(doc) -> None:
     )
     numbered(
         doc,
+        "The ef_search setting is read back with SHOW and returned as "
+        "applied_ef_search, so a silently ignored SET cannot be mistaken for a "
+        "real sweep.",
+    )
+    numbered(
+        doc,
+        "Both access-path flags are recorded: used_index_scan for HNSW and "
+        "used_sequential_scan for the exact baseline, so each method's plan is "
+        "proven rather than assumed.",
+    )
+    numbered(
+        doc,
         "The ef_search setting is restored in a finally block, so a pooled "
         "connection never carries the setting into another request.",
     )
@@ -1353,34 +1450,66 @@ def build_backend(doc) -> None:
     h3(doc, "4.5.7 The Ground Truth")
     p(
         doc,
-        "ground_truth_ids() issues the exact query for every query vector and "
-        "returns the identifier lists. It always uses the function form, "
-        "regardless of the method under test, so the reference is exact by "
-        "construction. These identifiers are what Recall@K compares against.",
+        "ground_truth_candidates() issues the exact query for every query "
+        "vector and returns a GroundTruth object per query. It always uses the "
+        "function form, regardless of the method under test, so the reference "
+        "is exact by construction. Two properties make it reproducible:",
+    )
+    bullet_list(
+        doc,
+        [
+            "The exact top-k is ordered by (distance, id). Without the id "
+            "tiebreak the K-th row would be whatever the executor happened to "
+            "return, and conventional Recall@K would not be reproducible.",
+            "A second query returns every id whose distance is within the "
+            "documented tolerance of the K-th boundary, "
+            "boundary × (1 + rel) + abs, so a returned neighbour that is "
+            "equally distant but differently identified can be recognised as "
+            "valid rather than counted as a miss.",
+        ],
+    )
+    p(
+        doc,
+        "The object exposes is_tied and candidate_ids, so both recall "
+        "definitions are computed from the same measurement rather than from "
+        "two different queries. The tolerance is a TieTolerance value stored on "
+        "the experiment row.",
     )
 
     h3(doc, "4.5.8 Plan Verification")
     p(
         doc,
-        "For every HNSW run the retrieval query is re-executed under EXPLAIN "
+        "Once per batch the retrieval query is re-executed under EXPLAIN "
         "(ANALYZE, FORMAT TEXT), and the plan text is tested by "
-        "plan_uses_index_scan():",
+        "plan_uses_index_scan(). When the index name is supplied, the plan must "
+        "reference that specific index, because a btree index scan would "
+        "otherwise satisfy the generic check and produce a false positive.",
     )
     code(
         doc,
-        "def plan_uses_index_scan(plan_text: str) -> bool:\n"
-        "    \"\"\"Detect whether the planner chose an HNSW index scan.\"\"\"\n"
+        "def plan_uses_index_scan(plan_text: str, index_name_: str | None = None) -> bool:\n"
+        "    \"\"\"Detect whether the planner chose an HNSW index scan.\n"
+        "\n"
+        "    When ``index_name_`` is given, the plan must reference that specific\n"
+        "    index. This matters because a btree index scan would otherwise satisfy\n"
+        "    the generic check and produce a false positive.\n"
+        "    \"\"\"\n"
         "    lowered = plan_text.lower()\n"
-        "    return \"index scan\" in lowered and (\"hnsw\" in lowered or \"index searches\" in lowered)",
-        caption="Listing 22 — Detecting the access path from the query plan.",
+        "    if \"index scan\" not in lowered:\n"
+        "        return False\n"
+        "    if index_name_ is not None:\n"
+        "        return index_name_.lower() in lowered\n"
+        "    return \"hnsw\" in lowered or \"index searches\" in lowered",
+        caption="Listing 23 — Detecting the access path from the query plan.",
     )
     p(
         doc,
         "The result is stored on the experiment row and displayed in the user "
-        "interface. At very high search-effort values the planner was "
-        "observed to revert to a sequential scan, at which point the "
-        "approximate results converge exactly onto the exact baseline — a "
-        "useful sanity check that the measurement machinery is behaving.",
+        "interface. The batch runner additionally prints a warning when a HNSW "
+        "run reports used_index_scan = False, so a sequential-scan fallback "
+        "cannot be mistaken for a fast approximate result. In the reported "
+        "sweep this check passed on every HNSW row, and every exact row reported "
+        "a sequential scan.",
     )
 
     h2(doc, "4.6 Classification and Metrics")
@@ -1405,12 +1534,26 @@ def build_backend(doc) -> None:
             [
                 "recall_at_k",
                 "(retrieved, ground_truth) -> float",
-                "The mean fraction of true neighbours that were retrieved.",
+                "Conventional Recall@K: the mean fraction of the deterministic "
+                "exact top-k identifiers that were retrieved.",
+            ],
+            [
+                "tie_aware_recall_at_k",
+                "(retrieved, candidates) -> float",
+                "Tie-aware Recall@K: the fraction of retrieved ids that fall "
+                "inside the K-th distance boundary, capped at 1.0.",
+            ],
+            [
+                "repetition_summary",
+                "(values) -> dict",
+                "Median, standard deviation, min, max and a t-based 95% "
+                "interval across repetitions.",
             ],
             [
                 "latency_stats",
                 "(latencies_ms) -> dict",
-                "Average, median, p95, p99, minimum and maximum.",
+                "Average, median, p95, p99, minimum and maximum over every "
+                "stored observation.",
             ],
         ],
         widths=[4.4, 6.2, 4.9],
@@ -1426,7 +1569,10 @@ def build_backend(doc) -> None:
         doc,
         "recall_at_k compares identifier sets, not values. It converts each "
         "retrieved list to a set, counts the members that appear in the "
-        "ground truth, and averages the fraction across queries.",
+        "deterministic ground truth, and averages the fraction across queries. "
+        "tie_aware_recall_at_k does the same against the boundary candidate "
+        "set and divides by k, so a valid but differently identified neighbour "
+        "is not penalised. Both are reported and neither replaces the other.",
     )
 
     h2(doc, "4.7 Experiment Orchestration")
@@ -1448,7 +1594,10 @@ def build_backend(doc) -> None:
             ["method", "'exact'", "'exact' or 'hnsw'"],
             ["ef_search", "None", "The search-effort parameter"],
             ["hnsw_m / hnsw_ef_construction", "16 / 64", "Build parameters"],
-            ["max_queries", "2,000", "How many test vectors to query"],
+            ["max_queries", "2,000", "How many distinct test vectors to query"],
+            ["repetitions", "1", "Complete timed passes over that query set"],
+            ["seed", "None", "Seed recorded for reproducibility"],
+            ["tie_tolerance", "1e-6 / 1e-6", "Relative and absolute tie tolerance"],
             ["name", "None", "A label for the run"],
             ["weighted_voting", "False", "Distance-weighted voting"],
         ],
@@ -1458,7 +1607,8 @@ def build_backend(doc) -> None:
     p(doc, "The function executes the following steps, in order:")
     numbered(
         doc,
-        "Load the dataset row and deserialise its preprocessing state.",
+        "Load the dataset row, deserialise its preprocessing state and compute "
+        "its fingerprint.",
     )
     numbered(
         doc,
@@ -1471,27 +1621,34 @@ def build_backend(doc) -> None:
     )
     numbered(
         doc,
-        "Compute the exact ground-truth neighbour set for every query.",
+        "Compute the exact ground-truth ids and the boundary candidate set for "
+        "every query.",
     )
     numbered(
         doc,
-        "Run the method under test over every query, timing each one.",
+        "Execute the method under test for repetitions complete passes over "
+        "the whole query set, in the same order, after one discarded warm-up "
+        "query. Every latency is recorded with its repetition number.",
     )
     numbered(
         doc,
-        "Compute Recall@K against the ground truth.",
+        "Compute conventional and tie-aware Recall@K per repetition, from that "
+        "pass's neighbour sets.",
     )
     numbered(
         doc,
-        "Classify both neighbour sets with the same majority-vote function.",
+        "Classify both neighbour sets with the same majority-vote function and "
+        "compute the classification metrics per repetition.",
     )
     numbered(
         doc,
-        "Compute the classification metrics and the latency summary.",
+        "Compute the latency summary over every stored observation, and the "
+        "cross-repetition mean and standard deviation of the quality metrics.",
     )
     numbered(
         doc,
-        "Persist the experiment row and the per-query latency samples.",
+        "Persist the experiment row, one experiment_repetitions row per pass "
+        "and one query_latencies row per measured query.",
     )
     p(
         doc,
@@ -1602,6 +1759,7 @@ def build_backend(doc) -> None:
             ["POST", "/api/experiments/run", "Run an experiment"],
             ["GET", "/api/experiments/compare", "Compare an exact and an HNSW run"],
             ["GET", "/api/experiments/{id}/latencies", "Per-query latency samples"],
+            ["GET", "/api/experiments/{id}/repetitions", "Per-repetition results"],
             ["GET", "/api/experiments/{id}/explain", "Configuration and access path"],
         ],
         widths=[2.2, 6.2, 7.1],
@@ -1634,13 +1792,16 @@ def build_backend(doc) -> None:
     code(
         doc,
         "python -m scripts.run_experiments \\\n"
-        "    --dataset-id 1 \\\n"
+        "    --dataset-id 116 \\\n"
         "    --sizes 10000,50000 \\\n"
         "    --ef-search 10,25,50,100,200,400 \\\n"
-        "    --k 5 --max-queries 1000 \\\n"
+        "    --k 5 --metric l2 --max-queries 1000 \\\n"
+        "    --repetitions 3 --seed 0 \\\n"
         "    --output ..\\docs\\results\\sweep.csv \\\n"
-        "    --json   ..\\docs\\results\\sweep.json",
-        caption="Listing 23 — Running the experiment matrix.",
+        "    --json   ..\\docs\\results\\sweep.json \\\n"
+        "    --repetition-details ..\\docs\\results\\repetition_details.csv \\\n"
+        "    --repetition-summary ..\\docs\\results\\repetition_summary.csv",
+        caption="Listing 24 — Running the experiment matrix.",
     )
     p(
         doc,
@@ -1649,6 +1810,18 @@ def build_backend(doc) -> None:
         "afterwards, in a finally block. The snapshot is written back with "
         "COPY, which preserves the row identifiers and therefore keeps the "
         "Recall@K references consistent across the sweep.",
+    )
+    p(
+        doc,
+        "The runner also enforces four guarantees that are easy to lose when "
+        "results are produced by hand. It writes 52 columns, including the "
+        "distinction between unique queries, repetitions and stored "
+        "observations. It reads the per-repetition rows back from the database "
+        "before writing the repetition artefacts, so the CSVs cannot drift from "
+        "the persisted run. It prints a warning when an HNSW row reports "
+        "used_index_scan = False. And it records index_reused together with a "
+        "NULL index_build_ms on reuse, so a later ef_search row never claims a "
+        "historical build as a fresh cost.",
     )
 
     h2(doc, "4.11 The Test Suite")
@@ -1663,6 +1836,16 @@ def build_backend(doc) -> None:
                 "macro metrics, Recall@K and the latency percentiles",
             ],
             [
+                "test_tie_aware_recall.py",
+                "Conventional versus tie-aware Recall@K: tied boundaries, "
+                "candidate sets, the cap, and identical results on untied data",
+            ],
+            [
+                "test_dataset_stats.py",
+                "Dataset fingerprinting, duplicate groups, mixed-label groups "
+                "and boundary-tie measurement",
+            ],
+            [
                 "test_preprocessing.py",
                 "Column-type inference, category mapping, the scaling "
                 "contract, unseen categories and the leakage contract",
@@ -1675,15 +1858,23 @@ def build_backend(doc) -> None:
             [
                 "test_vector_store.py",
                 "Table creation, exact retrieval, index building and reuse, "
-                "plan verification, and the monotonicity of Recall@K as "
-                "ef_search increases",
+                "plan verification, ground-truth determinism and repetition "
+                "accounting",
+            ],
+            [
+                "test_run_experiments.py",
+                "The runner's field set, CSV/JSON agreement, persisted latency "
+                "count, per-repetition rows and a full main() smoke test",
             ],
         ],
         widths=[5.0, 10.5],
     )
     p(
         doc,
-        "The integration tests are skipped automatically when PostgreSQL is "
+        "The suite contains 164 tests and runs against a real PostgreSQL + "
+        "pgvector instance; nothing is mocked, because a mocked vector store "
+        "would not prove that pgvector's planner behaves as assumed. The "
+        "integration tests are skipped automatically when PostgreSQL is "
         "unreachable, so the unit tests still run on a machine without a "
         "database.",
     )
@@ -1728,7 +1919,7 @@ def build_frontend(doc) -> None:
         "      bodySizeLimit: '256mb',\n"
         "    },\n"
         "  },",
-        caption="Listing 24 — The Next.js configuration.",
+        caption="Listing 25 — The Next.js configuration.",
     )
     h3(doc, "5.1.2 proxy.ts")
     p(
@@ -1752,7 +1943,7 @@ def build_frontend(doc) -> None:
         "export const config = {\n"
         "  matcher: ['/((?!api|_next|_vercel|.*\\\\..*).*)'],\n"
         "}",
-        caption="Listing 25 — The proxy.",
+        caption="Listing 26 — The proxy.",
     )
     h3(doc, "5.1.3 eslint.config.mjs")
     p(
@@ -1780,7 +1971,7 @@ def build_frontend(doc) -> None:
         "  ...nextVitals,\n"
         "  ...nextTypeScript,\n"
         "])",
-        caption="Listing 26 — The lint configuration.",
+        caption="Listing 27 — The lint configuration.",
     )
 
     h2(doc, "5.2 Internationalisation")
@@ -1800,7 +1991,7 @@ def build_frontend(doc) -> None:
         "  localePrefix: 'always',\n"
         "  localeDetection: false,\n"
         "})",
-        caption="Listing 27 — The locale routing configuration.",
+        caption="Listing 28 — The locale routing configuration.",
     )
     h3(doc, "5.2.2 request.ts")
     p(
@@ -1825,7 +2016,7 @@ def build_frontend(doc) -> None:
         "    router.replace(pathname, { locale: next })\n"
         "  })\n"
         "}",
-        caption="Listing 28 — Switching the locale without a full page load (components/app-header.tsx).",
+        caption="Listing 29 — Switching the locale without a full page load (components/app-header.tsx).",
     )
     note(
         doc,
@@ -1869,7 +2060,7 @@ def build_frontend(doc) -> None:
         "  suppressHydrationWarning\n"
         "  className={`${interFont.variable} ${vazirFont.variable}`}\n"
         ">",
-        caption="Listing 29 — The document element with the RTL switch.",
+        caption="Listing 30 — The document element with the RTL switch.",
     )
     p(
         doc,
@@ -1949,7 +2140,7 @@ def build_frontend(doc) -> None:
         "  if (response.status === 204) return undefined as T\n"
         "  return (await response.json()) as T\n"
         "}",
-        caption="Listing 30 — The API client core.",
+        caption="Listing 31 — The API client core.",
     )
     p(
         doc,
@@ -2144,8 +2335,9 @@ def build_appendix(doc) -> None:
         "      │                    fit_preprocessor(train_df)    │  ← statistics from\n"
         "      │                              │                   │    training only\n"
         "      │                              ▼                   │\n"
-        "      │                    StandardScaler + ordinal      │\n"
-        "      │                    encoding                     │\n"
+        "      │              standardise 10 continuous,          │\n"
+        "      │              keep 44 indicators 0/1              │\n"
+        "      │              (one-hot nominal for uploads)       │\n"
         "      │                              │                   │\n"
         "      │                              ▼                   ▼\n"
         "      │                    transform(train)      transform(test)\n"
@@ -2156,12 +2348,16 @@ def build_appendix(doc) -> None:
         "                    ┌──────────────┴───────────────┐\n"
         "                    ▼                              ▼\n"
         "           exact (function form)          HNSW (operator form)\n"
-        "           ground truth + baseline       recall, latency, accuracy\n"
+        "           ground truth ids +             N repetitions ×\n"
+        "           boundary candidates             every query\n"
         "                    │                              │\n"
         "                    └──────────────┬───────────────┘\n"
         "                                   ▼\n"
-        "                        majority vote → metrics → experiments",
-        caption="Listing 31 — The complete data flow of one experiment (diagram).",
+        "          majority vote → metrics per repetition → experiments\n"
+        "                    │\n"
+        "                    ▼\n"
+        "     experiment_repetitions + query_latencies → CSV artefacts",
+        caption="Listing 32 — The complete data flow of one experiment (diagram).",
     )
 
     h2(doc, "6.2 Extension Recipes")
@@ -2175,7 +2371,7 @@ def build_appendix(doc) -> None:
     numbered(
         doc,
         "Add the matching operator class to the ops dictionary in "
-        "create_hnsw_index.",
+        "_build_hnsw_index.",
     )
     numbered(
         doc,
@@ -2260,9 +2456,19 @@ def build_appendix(doc) -> None:
             ],
             [
                 "The HNSW run reports the same latency as the exact run",
-                "The planner reverted to a sequential scan",
-                "Inspect the access path with the explain endpoint; this "
-                "happens naturally at very high ef_search",
+                "The planner reverted to a sequential scan, or the session "
+                "ef_search was not applied",
+                "Inspect the access path and the applied ef_search with the "
+                "explain endpoint; a HNSW row without an index scan is not an "
+                "HNSW measurement",
+            ],
+            [
+                "Recall@K falls when ef_search rises",
+                "Not necessarily a bug. HNSW traversal is heuristic, so a "
+                "higher effort can change which candidate list survives; the "
+                "curve is not guaranteed to be monotonic",
+                "Re-run before concluding; treat an inversion as a result to "
+                "explain, not as an automatic failure",
             ],
             [
                 "The compare endpoint returns a 422",
@@ -2299,7 +2505,8 @@ def build_appendix(doc) -> None:
             ["Lint the frontend", "cd frontend && bun run lint"],
             ["Build the frontend", "cd frontend && bun run build"],
             ["Type-check", "cd frontend && bun run typecheck"],
-            ["Run the experiment matrix", "cd backend && .venv\\Scripts\\python -m scripts.run_experiments --dataset-id 1 --sizes 10000,50000 --ef-search 10,25,50,100,200,400"],
+            ["Run the experiment matrix", "cd backend && .venv\\Scripts\\python -m scripts.run_experiments --dataset-id 116 --sizes 10000,50000 --ef-search 10,25,50,100,200,400 --repetitions 3"],
+            ["Measure duplicates and ties", "cd backend && .venv\\Scripts\\python -m scripts.dataset_statistics --dataset-id 116"],
             ["Regenerate this guide", "python docs/tools/build_guide.py"],
             ["Regenerate the thesis", "python docs/tools/build_thesis.py"],
             ["Verify the whole stack", "scripts\\verify.bat"],

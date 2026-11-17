@@ -58,7 +58,7 @@ def load_results() -> list[dict]:
 def pick(rows: list[dict], size: int, method: str, ef: int | None):
     for row in rows:
         if (
-            int(row["train_size"]) == size
+            abs(int(row["train_size"]) - size) <= 1
             and row["retrieval_method"] == method
             and (ef is None or int(row["hnsw_ef_search"] or 0) == ef)
         ):
@@ -1070,6 +1070,7 @@ def build_chapter_4(doc) -> None:
         "    ef_search: int | None = None,\n"
         "    use_operator: bool = True,\n"
         "    warmup: bool = True,\n"
+        "    verify_plan: bool = True,\n"
         ") -> RetrievalResult:\n"
         "    \"\"\"Run a single nearest-neighbour query and time it.\n"
         "\n"
@@ -1077,16 +1078,25 @@ def build_chapter_4(doc) -> None:
         "    satisfied by an index and therefore guarantees an exhaustive scan.\n"
         "    ``method='hnsw'`` uses the *operator* form so the planner can choose an\n"
         "    HNSW index scan.\n"
+        "\n"
+        "    The search-effort parameter is set at *session* level rather than with\n"
+        "    ``SET LOCAL``, because the connection pool runs in autocommit mode where\n"
+        "    ``SET LOCAL`` is silently discarded. The value is read back from the\n"
+        "    server to confirm that it was actually applied, and it is restored in a\n"
+        "    ``finally`` block so that a pooled connection never leaks the setting\n"
+        "    into a later request.\n"
         "    \"\"\"\n"
         "    use_op = method == \"hnsw\" and use_operator\n"
+        "    applied_ef: int | None = None\n"
         "\n"
         "    with connection() as conn:\n"
         "        with conn.cursor() as cur:\n"
-        "            # The pool runs in autocommit mode, where SET LOCAL is a no-op,\n"
-        "            # so the search-effort parameter is set at session level and\n"
-        "            # explicitly restored afterwards.\n"
         "            if ef_search is not None:\n"
         "                cur.execute(f\"SET hnsw.ef_search = {int(ef_search)}\")\n"
+        "                # Confirm the server actually took the value.\n"
+        "                cur.execute(\"SHOW hnsw.ef_search\")\n"
+        "                row = cur.fetchone()\n"
+        "                applied_ef = int(row[\"hnsw.ef_search\"]) if row else None\n"
         "            try:\n"
         "                stmt = _query_sql(dataset_id, metric, k, use_op)\n"
         "                params: tuple = (query_vector, query_vector)\n"
@@ -1104,13 +1114,32 @@ def build_chapter_4(doc) -> None:
         "\n"
         "                plan = \"\"\n"
         "                used_index = False\n"
-        "                if method == \"hnsw\":\n"
+        "                used_seq_scan = False\n"
+        "                if verify_plan:\n"
         "                    cur.execute(_explain_sql(dataset_id, metric, k, use_op), params)\n"
         "                    plan = \"\\n\".join(r[\"QUERY PLAN\"] for r in cur.fetchall())\n"
-        "                    used_index = plan_uses_index_scan(plan)\n"
+        "                    used_index = plan_uses_index_scan(plan, index_name(dataset_id))\n"
+        "                    used_seq_scan = plan_uses_sequential_scan(plan)\n"
         "            finally:\n"
         "                if ef_search is not None:\n"
-        "                    cur.execute(\"RESET hnsw.ef_search\")",
+        "                    cur.execute(\"RESET hnsw.ef_search\")\n"
+        "\n"
+        "    neighbours = [\n"
+        "        Neighbour(\n"
+        "            row_id=int(r[\"id\"]),\n"
+        "            label=int(r[\"label\"]),\n"
+        "            distance=float(r[\"distance\"]),\n"
+        "        )\n"
+        "        for r in rows\n"
+        "    ]\n"
+        "    return RetrievalResult(\n"
+        "        neighbours=neighbours,\n"
+        "        latency_ms=elapsed_ms,\n"
+        "        used_index_scan=used_index,\n"
+        "        plan=plan,\n"
+        "        used_sequential_scan=used_seq_scan,\n"
+        "        applied_ef_search=applied_ef,\n"
+        "    )",
         caption="Listing 5 — The retrieval function; the heart of the comparison.",
     )
 
@@ -1176,17 +1205,27 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
         doc,
         ["Parameter", "Value"],
         [
-            ["Dataset", "UCI Forest CoverType"],
+            ["Dataset", "UCI Forest CoverType (dataset 116)"],
             ["Feature dimension", "54"],
-            ["Classes", "7 (1–7)"],
-            ["Training pool sizes", "10,000 and 50,000 rows (stratified subsample)"],
-            ["Test pool", "3,000 rows (1,000 queries per run)"],
+            ["Classes", "7 (0–6)"],
+            [
+                "Preprocessing",
+                "covertype: 10 continuous features standardised, 44 indicators 0/1",
+            ],
+            ["Training pool sizes", "9,999 and 50,000 rows (stratified subsample)"],
+            ["Held-out test pool", "3,000 rows (1,000 unique queries per run)"],
             ["k", "5"],
             ["Distance metric", "L2 (Euclidean)"],
             ["HNSW build parameters", "m = 16, ef_construction = 64"],
             ["Search-effort values", "10, 25, 50, 100, 200, 400"],
-            ["Queries per configuration", "1,000"],
-            ["Machine", "Single workstation, local PostgreSQL connection"],
+            ["Repetitions", "3 complete passes, identical query order"],
+            ["Latency observations", "3,000 per configuration"],
+            ["Warm-up", "1 discarded query per batch"],
+            ["Dataset fingerprint", "9,999 rows: af656f7b…; 50,000 rows: 6baa8fa2…"],
+            [
+                "Environment",
+                "Python 3.12.1, PostgreSQL 18.0, pgvector 0.8.7, 12 cores, Windows 11",
+            ],
         ],
         caption="Table 8 — The experimental configuration.",
         widths=[6.0, 9.5],
@@ -1204,6 +1243,7 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
                 method,
                 ef,
                 fmt_pct(row["recall_at_k"]),
+                fmt_pct(row["tie_aware_recall_at_k"]),
                 fmt_pct(row["accuracy"]),
                 fmt_pct(row["macro_f1"]),
                 fmt_ms(row["latency_p50_ms"]),
@@ -1218,6 +1258,7 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
             "Method",
             "ef",
             "Recall@K",
+            "Tie-aware",
             "Accuracy",
             "Macro F1",
             "p50 (ms)",
@@ -1226,8 +1267,16 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
         ],
         table_rows,
         caption="Table 9 — All measured configurations.",
-        widths=[2.0, 1.6, 1.2, 2.1, 2.1, 2.0, 1.9, 1.9, 1.9],
-        font_size=8,
+        widths=[1.7, 1.4, 1.0, 1.8, 1.8, 1.8, 1.7, 1.6, 1.6, 1.6],
+        font_size=7.5,
+    )
+    p(
+        doc,
+        "The two recall columns coincide in every row because the measured "
+        "boundary-tie count is zero for this pool (Section 5.8). Both are "
+        "reported because that agreement is a measurement, not a definition: "
+        "the tie-aware metric would diverge on data where several training "
+        "vectors sit exactly at the K-th distance.",
     )
 
     h2(doc, "5.3 RQ1 — Effect on Query Latency")
@@ -1263,33 +1312,40 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
     )
     p(
         doc,
-        "Approximate search reduced median query latency by a factor of 3.2 to "
-        "45.0 depending on the configuration. The reduction is not marginal: at "
+        "Approximate search reduced median query latency by a factor of 3.0 to "
+        "48.8 depending on the configuration. The reduction is not marginal: at "
         "the most aggressive search effort the approximate method answered a "
-        "query in 0.22 ms where the exact method required 11.31 ms. Every HNSW "
-        "run was confirmed by query-plan inspection to have used the HNSW index "
-        "scan, so these figures reflect the indexed access path rather than a "
-        "silent fallback.",
+        "query in 0.230 ms where the exact method required 11.226 ms, a 48.8-fold "
+        "difference. Every HNSW row was confirmed by query-plan inspection to "
+        "have used the HNSW index scan and to have applied the requested "
+        "ef_search, while both exact rows reported a sequential scan; the "
+        "figures therefore reflect the intended access paths rather than a "
+        "silent fallback or a discarded setting.",
     )
 
     h2(doc, "5.4 RQ2 — Retrieval Accuracy of HNSW")
     p(
         doc,
-        "Recall@K against the exact ground truth ranged from 86.6% to 98.5% "
-        "across the configurations. The values increase monotonically with the "
-        "search-effort parameter at both dataset sizes, and approach but do "
-        "not reach 1.0 even at the highest value tested, which is the expected "
-        "behaviour of an approximate index.",
+        "Recall@K against the exact ground truth ranged from 98.2% to 100.0% "
+        "across the configurations. At 50,000 rows it rose from 98.22% at "
+        "ef_search = 10 to 99.78% at ef_search = 50 and 99.98% at ef_search = "
+        "100, then stayed at 99.98% through ef_search = 400. At 9,999 rows the "
+        "curve starts higher, at 99.52% for ef_search = 10, and reaches 100.00% "
+        "at ef_search = 100.",
     )
     p(
         doc,
-        "The trade-off curve has the characteristic shape of approximate "
-        "nearest-neighbor search: a steep gain in recall across the first order "
-        "of magnitude of ef_search, followed by diminishing returns. On the "
-        "50,000-row dataset, raising ef_search from 10 to 100 improved recall "
-        "from 86.6% to 94.6% while median latency rose from 0.25 ms to 0.48 "
-        "ms; raising it further to 400 bought a further 1.9 percentage points "
-        "of recall for a further doubling of latency.",
+        "In this run recall increased with search effort at both sizes, but that "
+        "is an observation about these six configurations rather than a "
+        "guarantee. Graph traversal is heuristic, and a higher effort can change "
+        "which candidate list survives without strictly containing the "
+        "lower-effort result. The plateau at 99.98% rather than 100% at 50,000 "
+        "rows is a concrete reminder that near-perfect is not perfect, and the "
+        "curve is flatter than a purely continuous feature space would suggest. "
+        "A plausible contributing factor is the representation: 44 of the 54 "
+        "coordinates are binary indicators, so many rows share coordinate values "
+        "even though no two full feature vectors are identical. That is a "
+        "hypothesis about graph locality, not a demonstrated cause.",
     )
 
     h2(doc, "5.5 RQ3 — Effect on Classification Quality")
@@ -1305,16 +1361,16 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
             if not (exact_row and hnsw_row):
                 continue
             recall_drop = (float(exact_row["recall_at_k"]) - float(hnsw_row["recall_at_k"])) * 100
-            acc_drop = (float(exact_row["accuracy"]) - float(hnsw_row["accuracy"])) * 100
+            acc_delta = (float(hnsw_row["accuracy"]) - float(exact_row["accuracy"])) * 100
             impact_rows.append(
                 [
                     f"{size:,}",
                     ef,
-                    f"{recall_drop:.1f} pp",
-                    f"{acc_drop:.2f} pp",
-                    f"{recall_drop / acc_drop:.1f}×"
-                    if abs(acc_drop) > 1e-9
-                    else "∞",
+                    f"{recall_drop:.2f} pp",
+                    f"{acc_delta:+.2f} pp",
+                    f"{recall_drop / abs(acc_delta):.1f}×"
+                    if abs(acc_delta) > 1e-9
+                    else "—",
                 ]
             )
     table(
@@ -1323,47 +1379,51 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
             "Train rows",
             "ef",
             "Recall@K drop",
-            "Accuracy drop",
+            "Accuracy change",
             "Ratio",
         ],
         impact_rows,
-        caption="Table 11 — The retrieval penalty is roughly an order of magnitude larger than the classification penalty.",
+        caption="Table 11 — Retrieval loss versus classification change.",
         widths=[2.8, 1.8, 3.4, 3.4, 2.4],
     )
     p(
         doc,
-        "In every configuration the loss in classification accuracy is roughly "
-        "an order of magnitude smaller than the loss in retrieval recall. On "
-        "the 50,000-row dataset at ef_search = 10, the approximate method "
-        "missed 13.4 percentage points of true neighbours, yet the resulting "
-        "classification accuracy fell by only 3.3 percentage points. At "
-        "ef_search = 400 the retrieval gap narrowed to 3.5 points while the "
-        "accuracy gap narrowed to 0.3 points.",
+        "At 50,000 rows and ef_search = 10, the approximate method missed 1.78 "
+        "percentage points of exact neighbours while accuracy moved from 85.60% "
+        "to 85.50%, a change of 0.10 points. At ef_search = 25 and above, "
+        "accuracy is 85.70–85.80% and macro F1 74.00–74.03%, slightly above the "
+        "exact baseline's 85.60% and 73.14%.",
+    )
+    p(
+        doc,
+        "That direction of change must not be over-read. With 1,000 queries a "
+        "difference of 0.1 percentage points is one query, so these small "
+        "positive differences are not evidence that approximation improves "
+        "classification. The defensible statement is narrower: in this sweep the "
+        "classification difference is at most 0.2 percentage points in either "
+        "direction while the retrieval gap reaches 1.78 points.",
     )
     p(
         doc,
         "The explanation is structural rather than incidental. A missed "
-        "neighbour changes the predicted class only if it would have flipped "
-        "the majority vote among the k retrieved neighbours. With k = 5, a "
-        "single different neighbour is very often outvoted, so the "
-        "classification outcome is far more stable than the neighbour set "
-        "itself. This is a general property of majority-vote KNN rather than a "
-        "property of any particular dataset, and it is the practical argument "
-        "for approximate retrieval in a classification setting.",
+        "neighbour changes the predicted class only if it would have flipped the "
+        "majority vote among the k retrieved neighbours. With k = 5, a single "
+        "different neighbour is often outvoted, so the classification outcome is "
+        "more stable than the neighbour set itself. This is a property of the "
+        "majority-vote rule on this workload; the measurements do not establish "
+        "that it holds equally for other k, other data or weighted voting.",
     )
     p(
         doc,
-        "The macro F1 figures tell a complementary story. Because CoverType is "
-        "heavily imbalanced, accuracy is dominated by the majority classes "
-        "while macro F1 weights all seven equally. On the 50,000-row dataset "
-        "at ef_search = 10, accuracy fell by 3.3 points while macro F1 fell by "
-        "8.7 points — a larger relative penalty, which is the expected "
-        "consequence of the approximation perturbing the rarer classes' "
-        "neighbourhoods more severely. The practical reading is that "
-        "approximate retrieval is somewhat more costly for minority classes, "
-        "and that a deployment that cares about per-class fairness should tune "
-        "ef_search accordingly rather than relying on the aggregate accuracy "
-        "figure.",
+        "The macro figures tell a complementary story, but a smaller one than "
+        "was previously reported. Because CoverType is heavily imbalanced, "
+        "accuracy is dominated by the majority classes while macro F1 weights "
+        "all seven equally. In this sweep the two move together: at 50,000 rows "
+        "and ef_search = 10 both accuracy and macro F1 are 0.10 points below the "
+        "exact row, and at higher effort both are slightly above it. The "
+        "measured data therefore do not support a claim that approximation "
+        "specifically harms minority classes on this workload; that remains a "
+        "reasonable concern to monitor, not a finding of this experiment.",
     )
 
     h2(doc, "5.6 RQ4 — Influence of the Search-Effort Parameter")
@@ -1379,12 +1439,27 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
     )
     p(
         doc,
-        "The measured curve supports such an operating point. On the "
-        "50,000-row dataset, ef_search = 100 recovers 94.6% of the true "
-        "neighbours for a 11.3-fold latency reduction, which is a reasonable "
-        "default; ef_search = 400 recovers 96.5% for an 11.3-fold reduction, "
-        "which is the appropriate choice when classification quality matters "
-        "more than latency.",
+        "The measured curve supports such an operating point, with a caveat "
+        "about how flat it is. On the 50,000-row dataset, ef_search = 50 "
+        "recovers 99.78% of the true neighbours for a 33.9-fold median-latency "
+        "reduction, and ef_search = 100 recovers 99.98% for 25.4-fold. Going "
+        "further to 400 buys the same 99.98% recall for a 10.4-fold reduction, "
+        "so higher effort beyond this point is pure cost on this workload. The "
+        "useful range is narrower than it would be on a dataset where recall "
+        "degrades steeply at low effort.",
+    )
+    p(
+        doc,
+        "The repetition data add a second observation that the aggregate row "
+        "hides. Across three complete passes, recall, accuracy and macro F1 were "
+        "identical in every configuration, while per-repetition mean latency "
+        "varied with a standard deviation between 0.0013 ms and 0.20 ms. The "
+        "largest relative dispersion was 6.9% (9,999 rows, ef_search = 25, mean "
+        "0.264 ms); most configurations were below 3%. With only three passes the "
+        "95% interval is wide — for 50,000 rows at ef_search = 100 the "
+        "per-repetition mean is 0.465 ms with an interval of [0.415, 0.516] ms — "
+        "so between-pass differences of a few hundredths of a millisecond are "
+        "not resolved by this design.",
     )
 
     h2(doc, "5.7 RQ5 — Influence of Dataset Size")
@@ -1406,7 +1481,9 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
                 fmt_ms(exact_row["latency_p50_ms"]),
                 fmt_ms(hnsw_row["latency_p50_ms"]),
                 f"{float(exact_row['latency_p50_ms']) / float(hnsw_row['latency_p50_ms']):.1f}×",
-                fmt_ms(exact_row["index_build_ms"], 0) if exact_row["index_build_ms"] else "—",
+                fmt_ms(hnsw_row["index_build_ms"], 1)
+                if hnsw_row["index_build_ms"]
+                else "—",
             ]
         )
     table(
@@ -1424,79 +1501,133 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
     )
     p(
         doc,
-        "Between 10,000 and 50,000 rows the exact baseline's median latency "
-        "grew from 2.49 ms to 11.31 ms, a factor of 4.5 for a factor of 5 in "
+        "Between 9,999 and 50,000 rows the exact baseline's median latency grew "
+        "from 2.769 ms to 11.226 ms, a factor of 4.05 for a factor of 5.0 in "
         "data — close to linear, as a sequential scan over a growing table "
-        "should be. The HNSW median latency grew only from 0.22 ms to 0.25 ms, "
-        "a factor of 1.1. The speed-up accordingly widened from 11.3× to 45.0×.",
+        "should be. The HNSW median latency at ef_search = 10 grew only from "
+        "0.211 ms to 0.230 ms, a factor of 1.09. The speed-up accordingly widened "
+        "from 13.1× to 48.8×.",
     )
     p(
         doc,
-        "This is the theoretically expected behaviour — the HNSW search cost is "
-        "close to logarithmic in the number of elements — and it has a direct "
-        "practical consequence. Approximate retrieval is not merely a constant-"
-        "factor optimisation that is worth adopting once a dataset becomes "
-        "large enough; its value increases without bound as the dataset grows. "
-        "The cost side is a one-off index construction, 560 ms at 10,000 rows "
-        "and 3,080 ms at 50,000 rows, which is amortised over every subsequent "
-        "query.",
+        "This is consistent with the expected behaviour — the HNSW search cost "
+        "is close to logarithmic in the number of elements — and it has a direct "
+        "practical consequence. Approximate retrieval is not merely a "
+        "constant-factor optimisation that becomes worth adopting at some "
+        "threshold; its relative advantage grows with the table. The cost side is "
+        "a one-off index construction, 597.6 ms at 9,999 rows and 3,239.0 ms at "
+        "50,000 rows, which is amortised over every subsequent query. The index "
+        "was reused for the five remaining ef_search values at each size, "
+        "recorded as index_reused = true with a NULL current build time.",
     )
 
-    h2(doc, "5.8 Discussion")
-    h3(doc, "5.8.1 Answering the research question")
+    h2(doc, "5.8 Duplicate Vectors and Boundary Ties")
+    p(
+        doc,
+        "A natural objection to identifier-level Recall@K is that duplicate or "
+        "equally distant training vectors give a returned neighbour a valid "
+        "identity that the reference did not list. Rather than assert or dismiss "
+        "that objection, the platform measures it. A dedicated script reports "
+        "unique vector count, duplicate groups, the largest group, mixed-label "
+        "groups, the number of queries with a tied exact K-th distance, the "
+        "largest boundary candidate set, and whether any tie would change the "
+        "majority vote.",
+    )
+    table(
+        doc,
+        ["Statistic", "Measured value"],
+        [
+            ["Training vectors", "50,000"],
+            ["Unique feature vectors", "50,000"],
+            ["Duplicate groups", "0"],
+            ["Duplicate rows", "0 (0.0%)"],
+            ["Largest duplicate group", "1"],
+            ["Groups containing more than one label", "0"],
+            ["Queries with a tied exact K-th distance", "0 of 1,000"],
+            ["Largest boundary candidate set", "5 (= k)"],
+            ["Ties whose alternative would change the vote", "0"],
+        ],
+        caption="Table 13 — Duplicate and tie statistics for the 50,000-row pool.",
+        widths=[9.0, 6.5],
+    )
+    p(
+        doc,
+        "The raw 581,012-row UCI file was checked independently and likewise "
+        "contains 581,012 unique full-feature vectors. The hypothesis that "
+        "duplicate Covertype vectors explain the recall/accuracy gap is "
+        "therefore rejected for this dataset by measurement. Conventional and "
+        "tie-aware Recall@K coincide here because there are no boundary ties, "
+        "and the reported Recall@K is identifier-level agreement with an untied "
+        "reference.",
+    )
+    p(
+        doc,
+        "That result is narrower than a general claim. Ties can occur on other "
+        "data, and distinct vectors can share a distance — points arranged "
+        "symmetrically around a query are the obvious case. The honest reading "
+        "is that on this pool the metric is not distorted by ties, which removes "
+        "one explanation for the small recall/accuracy gap and leaves the "
+        "behaviour of the majority vote as the more plausible one. It does not "
+        "prove that explanation either.",
+    )
+
+    h2(doc, "5.9 Discussion")
+    h3(doc, "5.9.1 Answering the research question")
     p(
         doc,
         "The research question asks whether approximate nearest-neighbor search "
         "can improve the performance of a KNN classification system while "
         "maintaining acceptable classification quality. The measurements answer "
-        "it affirmatively, with a qualification.",
+        "it affirmatively for this workload, with qualifications.",
     )
     p(
         doc,
-        "The performance gain is substantial and grows with scale: a 45-fold "
-        "reduction in median query latency at 50,000 training rows. The "
-        "classification cost is small but not zero: up to 3.3 percentage points "
-        "of accuracy at the most aggressive search effort, falling to 0.3 "
-        "points at higher effort. Whether this constitutes “acceptable” "
-        "classification quality is a domain decision rather than a technical "
-        "one, but the measurements make that decision possible: the platform "
-        "exposes the entire trade-off so that the operating point can be chosen "
-        "with evidence rather than intuition.",
+        "The performance gain is substantial and grows with scale: a 48.8-fold "
+        "reduction in median query latency at 50,000 training rows and the "
+        "lowest search effort. The classification cost is small but not zero: "
+        "at most 0.2 percentage points of accuracy in either direction in this "
+        "sweep, and the difference is not statistically meaningful with 1,000 "
+        "queries. Whether that constitutes “acceptable” classification quality "
+        "is a domain decision rather than a technical one, but the measurements "
+        "make the decision possible: the platform exposes the entire trade-off "
+        "so that an operating point can be chosen with evidence rather than "
+        "intuition.",
     )
-    h3(doc, "5.8.2 Practical recommendations")
+    h3(doc, "5.9.2 Practical recommendations")
     numbered(
         doc,
-        "Use exact search for small datasets. Below roughly 10,000 rows the "
-        "speed-up is 11× at the most aggressive setting and the absolute "
-        "latency is already sub-millisecond for the approximate method, so the "
-        "operational complexity of maintaining an index may not be justified.",
-    )
-    numbered(
-        doc,
-        "Adopt approximate search as the default for large datasets, with "
-        "ef_search = 100 as a sound starting point: it recovers 94.6% of the "
-        "true neighbours at 50,000 rows for an 11× latency reduction.",
+        "Use exact search when the table is small. At 9,999 rows exact median "
+        "latency is already 2.77 ms, and the absolute gain from approximation is "
+        "a fraction of a millisecond. The operational complexity of maintaining "
+        "an index may not be justified below a few tens of thousands of rows.",
     )
     numbered(
         doc,
-        "Monitor minority-class metrics, not only aggregate accuracy. The "
-        "macro F1 penalty is larger than the accuracy penalty because the "
-        "approximation perturbs the rarer classes' neighbourhoods more "
-        "severely.",
+        "Adopt approximate search as the default for larger tables, with "
+        "ef_search = 50 or 100 as a starting point: at 50,000 rows those values "
+        "recover 99.78% and 99.98% of the true neighbours for 33.9-fold and "
+        "25.4-fold median-latency reductions. Tune from the measured curve "
+        "rather than from a fixed default.",
+    )
+    numbered(
+        doc,
+        "Report retrieval and classification metrics separately. On this "
+        "workload the retrieval gap reached 1.78 points while accuracy moved by "
+        "0.1 points; quoting only one of them would misrepresent the other.",
     )
     numbered(
         doc,
         "Keep the exact baseline available. It costs one sequential scan per "
-        "query but provides a ground truth that makes the approximate "
+        "query but provides the ground truth that makes the approximate "
         "configuration auditable, and it is the reference against which "
         "Recall@K is defined.",
     )
     numbered(
         doc,
-        "Verify the access path, do not assume it. Every HNSW run in this "
-        "project checks the query plan, and at very high search-effort values "
-        "the planner was observed to revert to a sequential scan, at which "
-        "point the results converge exactly onto the exact baseline.",
+        "Verify the access path and the applied parameter, do not assume them. "
+        "Every HNSW batch in this project checks the plan and reads back the "
+        "session ef_search; without that check a sequential-scan fallback or a "
+        "discarded SET would look like a fast, accurate HNSW result.",
     )
 
     page_break(doc)
@@ -1515,33 +1646,38 @@ def build_chapter_6(doc) -> None:
     )
     p(
         doc,
-        "The experimental evidence supports the central hypothesis. Approximate "
-        "retrieval delivered latency reductions of 3.2× to 45.0× over the exact "
-        "baseline, with the benefit growing as the dataset scaled, while "
-        "limiting the classification accuracy penalty to at most 3.3 "
-        "percentage points and to 0.3 percentage points at a high search "
-        "effort.",
+        "The experimental evidence supports the central hypothesis for this "
+        "workload. Approximate retrieval delivered median-latency reductions of "
+        "3.0× to 48.8× over the exact baseline, with the benefit growing as the "
+        "training pool scaled, while the classification difference stayed "
+        "within 0.2 percentage points in either direction.",
     )
     p(
         doc,
-        "The most valuable conceptual finding is the asymmetry between retrieval "
-        "quality and classification quality. Because a majority vote over k = 5 "
-        "neighbours is robust to the loss of individual neighbours, the "
-        "accuracy penalty of approximation is roughly an order of magnitude "
-        "smaller than the recall penalty. This suggests that approximate "
-        "retrieval should be evaluated by its effect on the downstream task "
-        "rather than by its effect on neighbour-set fidelity alone — a "
-        "conclusion that would not have been apparent without the "
-        "Recall@K-versus-accuracy decomposition performed here.",
+        "The most useful conceptual finding is the asymmetry between retrieval "
+        "quality and classification quality. Recall@5 fell by as much as 1.78 "
+        "points while accuracy moved by 0.1 points, because a majority vote "
+        "over k = 5 neighbours is insensitive to the loss of an individual "
+        "neighbour unless that loss flips the vote. This suggests that "
+        "approximate retrieval should be judged by its effect on the downstream "
+        "task as well as by neighbour-set fidelity — a conclusion that required "
+        "the Recall@K-versus-accuracy decomposition performed here, and one "
+        "that is stated for this dataset and voting rule rather than as a "
+        "universal law.",
     )
     p(
         doc,
-        "A second contribution is methodological. The decisions to use the "
-        "distance function for the baseline, to use one table per dataset, and "
-        "to verify the access path on every run were each necessary to keep "
-        "the comparison honest, and each was forced by a specific behaviour of "
-        "pgvector or PostgreSQL. They are documented in detail so that the "
-        "measurements can be trusted and reproduced.",
+        "A second contribution is methodological, and in this project it proved "
+        "as important as the numbers. The audit behind this version found that "
+        "an earlier pipeline reported “three repetitions” without executing "
+        "them, used SET LOCAL on an autocommit connection so every run silently "
+        "used the default ef_search, ordinal-encoded nominal categories, and "
+        "charged a reused index's historical build time to every row. Each "
+        "defect produced plausible output. The corrected pipeline executes and "
+        "stores every repetition, forces the exact baseline through the "
+        "distance function, verifies the access path and the applied parameter, "
+        "and separates fresh build time from reuse. Those checks, not the "
+        "headline speed-up, are what make the measurements trustworthy.",
     )
 
     h2(doc, "6.2 Limitations")
@@ -1549,13 +1685,25 @@ def build_chapter_6(doc) -> None:
         doc,
         [
             "The evaluation covers a single dataset and a single machine. The "
-            "qualitative findings — the robustness of the vote, the growth of "
-            "the speed-up — are expected to generalise, but the specific "
-            "constants are not.",
+            "qualitative findings — the stability of the vote, the growth of "
+            "the speed-up — are hypotheses beyond this workload, and the "
+            "specific constants are local to this hardware and these "
+            "configurations.",
             "Only the L2 metric was evaluated in the full sweep. The platform "
             "supports cosine and L1, and the operator-class matching logic "
             "handles them, but a complete metric comparison remains future "
             "work.",
+            "The three repetitions reuse the same query set, query order and "
+            "index. Their spread measures run-to-run variability, not sampling "
+            "error over the 3,000 held-out rows, and three passes are too few "
+            "to support a narrow interval.",
+            "Quality metrics were identical across passes in this setup. That "
+            "is an observation about this pgvector build with a fixed graph and "
+            "query order, not a general claim that HNSW search is "
+            "deterministic.",
+            "Only 1,000 of the 3,000 held-out rows are evaluated per run; a "
+            "difference of 0.1 percentage points corresponds to one query, so "
+            "differences of that size are not interpreted as effects.",
             "The k sweep was not run at scale; the expectation that larger k "
             "narrows the accuracy gap is stated in the experiment plan but is "
             "not supported by the data presented here.",
@@ -1577,6 +1725,12 @@ def build_chapter_6(doc) -> None:
             "weighted-voting variant to the matrix.",
             "Evaluate IVFFlat as an alternative index and compare it against "
             "HNSW across the same trade-off surface.",
+            "Add a resampling design: draw independent query sets per "
+            "repetition so that recall can be estimated with a genuine sampling "
+            "interval, and report it alongside the run-to-run timing spread.",
+            "Repeat the duplicate and tie analysis on a dataset that is known "
+            "to contain duplicates, to test the tie-aware metric where the two "
+            "recall definitions actually diverge.",
             "Investigate the effect of the HNSW build parameters m and "
             "ef_construction, which are currently fixed, on the attainable "
             "recall–latency frontier.",
@@ -1662,14 +1816,15 @@ def build_appendices(doc) -> None:
         "│   │   ├── core/         Settings and connection pool\n"
         "│   │   ├── db/           Schema and bootstrap\n"
         "│   │   └── services/     Research logic\n"
-        "│   │       ├── classification.py   Voting and metrics\n"
+        "│   │       ├── classification.py   Voting, metrics, tie-aware recall\n"
+        "│   │       ├── dataset_stats.py    Fingerprint, duplicates, ties\n"
         "│   │       ├── datasets.py         Acquisition and splitting\n"
         "│   │       ├── experiments.py      Orchestration\n"
         "│   │       ├── metrics.py          Distance metrics\n"
         "│   │       ├── preprocessing.py    Feature transformation\n"
         "│   │       └── vector_store.py     Exact and HNSW retrieval\n"
-        "│   ├── scripts/run_experiments.py  Batch experiment matrix\n"
-        "│   └── tests/                       47 automated tests\n"
+        "│   ├── scripts/                    Batch runner, dataset statistics\n"
+        "│   └── tests/                      164 automated tests\n"
         "├── frontend/\n"
         "│   ├── app/[locale]/      Overview, Datasets, Experiments, Compare, Methodology\n"
         "│   ├── components/        UI library and feature components\n"
@@ -1696,16 +1851,24 @@ def build_appendices(doc) -> None:
         "  -H \"Content-Type: application/json\" `\n"
         "  -d '{\"name\":\"Forest CoverType\",\"test_size\":3000,\"max_train_rows\":50000}'\n"
         "\n"
-        "# 3. Run the experiment matrix\n"
+        "# 3. Measure duplicate vectors and boundary ties\n"
+        ".venv\\Scripts\\python -m scripts.dataset_statistics `\n"
+        "    --dataset-id 116 --k 5 --metric l2 --max-queries 1000 `\n"
+        "    --output ..\\docs\\results\\duplicate_stats.json\n"
+        "\n"
+        "# 4. Run the experiment matrix\n"
         ".venv\\Scripts\\python -m scripts.run_experiments `\n"
-        "    --dataset-id 1 `\n"
+        "    --dataset-id 116 `\n"
         "    --sizes 10000,50000 `\n"
         "    --ef-search 10,25,50,100,200,400 `\n"
-        "    --k 5 --max-queries 1000 `\n"
+        "    --k 5 --metric l2 --max-queries 1000 `\n"
+        "    --repetitions 3 --seed 0 `\n"
         "    --output ..\\docs\\results\\sweep.csv `\n"
-        "    --json   ..\\docs\\results\\sweep.json\n"
+        "    --json ..\\docs\\results\\sweep.json `\n"
+        "    --repetition-details ..\\docs\\results\\repetition_details.csv `\n"
+        "    --repetition-summary ..\\docs\\results\\repetition_summary.csv\n"
         "\n"
-        "# 4. Verify the implementation\n"
+        "# 5. Verify the implementation\n"
         ".venv\\Scripts\\python -m pytest",
         caption="Listing 7 — The commands that reproduce every figure in Chapter 5.",
     )
