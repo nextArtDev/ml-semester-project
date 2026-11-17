@@ -39,6 +39,7 @@ export function DatasetsContent() {
   const [maxRows, setMaxRows] = useState('')
   const [maxTrainRows, setMaxTrainRows] = useState('')
   const [testSize, setTestSize] = useState('5000')
+  const [preprocessingMode, setPreprocessingMode] = useState<'covertype' | 'standardize_all'>('covertype')
   const [uploadName, setUploadName] = useState('')
   const [targetColumn, setTargetColumn] = useState('label')
   const [pendingFile, setPendingFile] = useState<File | null>(null)
@@ -57,6 +58,7 @@ export function DatasetsContent() {
         max_rows: maxRows ? Number(maxRows) : null,
         max_train_rows: maxTrainRows ? Number(maxTrainRows) : null,
         test_size: testSize ? Number(testSize) : null,
+        preprocessing_mode: preprocessingMode,
       }),
     onSuccess: (result) => {
       toast.success(

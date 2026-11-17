@@ -15,6 +15,31 @@ from app.main import app
 client = TestClient(app)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_created_datasets():
+    """Remove any dataset this module creates.
+
+    Some validation tests deliberately reach the handler (a 400 rather than a
+    422 proves that validation passed), which means they really ingest a small
+    dataset. Those rows must not survive the test run.
+    """
+    from app.core.database import execute, fetch_all, fetch_one
+    from app.services import vector_store as vs
+
+    before = fetch_one("SELECT COALESCE(max(id), 0) AS m FROM datasets")
+    highest = int(before["m"])
+
+    yield
+
+    for row in fetch_all("SELECT id FROM datasets WHERE id > %s", (highest,)):
+        dataset_id = int(row["id"])
+        try:
+            vs.drop_dataset_tables(dataset_id)
+        except Exception:  # tables may never have been created
+            pass
+        execute("DELETE FROM datasets WHERE id = %s", (dataset_id,))
+
+
 class TestExperimentRequestValidation:
     def test_k_must_be_positive(self) -> None:
         response = client.post(
