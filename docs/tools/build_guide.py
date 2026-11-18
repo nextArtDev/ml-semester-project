@@ -649,9 +649,20 @@ def build_database(doc) -> None:
                 "JSONB detail for inspection and plotting",
             ],
             [
+                "Sampling and order",
+                "query_sampling, query_sample_seed, evaluated_query_ids, "
+                "test_pool_class_distribution, evaluated_class_distribution, "
+                "benchmark_round, benchmark_position, benchmark_seed, "
+                "benchmark_order, warm_cache",
+                "Which queries were evaluated and in what configuration order",
+            ],
+            [
                 "Timing",
-                "total_runtime_s, api_overhead_s",
-                "Wall-clock duration of the whole run and of non-query work",
+                "total_experiment_runtime_s, index_preparation_s, index_build_s, "
+                "ground_truth_computation_s, retrieval_total_s, "
+                "retrieval_mean_per_query_ms, metrics_computation_s, "
+                "persistence_s, orchestration_overhead_s",
+                "Non-overlapping perf_counter intervals for the run",
             ],
         ],
         widths=[2.8, 7.2, 5.5],
@@ -665,7 +676,11 @@ def build_database(doc) -> None:
         "index_build_ms / index_reused / index_reused_build_ms trio separates a "
         "build that happened during this run from a historical build that is "
         "being reused: on a reused index the current build time is NULL and the "
-        "historical duration lives in index_reused_build_ms.",
+        "historical duration lives in index_reused_build_ms. The timing columns "
+        "replace the retired api_overhead_s, which was total runtime minus "
+        "query time and therefore charged ground-truth computation and "
+        "orchestration to 'API overhead'. The legacy total_runtime_s is kept as "
+        "an alias for older clients.",
     )
 
     h3(doc, "3.2.3 query_latencies")
@@ -1297,16 +1312,57 @@ def build_backend(doc) -> None:
     )
     code(
         doc,
+        "def _order_expr(dist: sql.Composable, use_operator: bool) -> sql.Composable:\n"
+        "    \"\"\"Ordering for a nearest-neighbour query.\n"
+        "\n"
+        "    The exhaustive path gets an ``id`` tiebreak so that a repeated exact query\n"
+        "    returns the same identifiers even when several rows share a distance.  The\n"
+        "    HNSW path keeps only the index-compatible distance ordering: adding a\n"
+        "    secondary sort key makes the planner abandon the index scan, which would\n"
+        "    turn an approximate measurement into a sequential scan.\n"
+        "    \"\"\"\n"
+        "    if use_operator:\n"
+        "        return dist\n"
+        "    return sql.SQL(\"{dist}, id\").format(dist=dist)\n"
+        "\n"
+        "\n"
         "def _query_sql(\n"
         "    dataset_id: int, metric: DistanceMetric, k: int, use_operator: bool\n"
         ") -> sql.Composed:\n"
         "    dist = _distance_expr(metric, use_operator)\n"
+        "    order = _order_expr(dist, use_operator)\n"
         "    return sql.SQL(\n"
         "        \"SELECT id, label, {dist} AS distance \"\n"
         "        \"FROM {t} \"\n"
-        "        \"ORDER BY {dist} \"\n"
+        "        \"ORDER BY {order} \"\n"
         "        \"LIMIT {k}\"\n"
-        "    ).format(dist=dist, t=sql.Identifier(train_table(dataset_id)), k=sql.Literal(k))",
+        "    ).format(\n"
+        "        dist=dist,\n"
+        "        order=order,\n"
+        "        t=sql.Identifier(train_table(dataset_id)),\n"
+        "        k=sql.Literal(k),\n"
+        "    )\n"
+        "\n"
+        "\n"
+        "def _explain_sql(\n"
+        "    dataset_id: int, metric: DistanceMetric, k: int, use_operator: bool\n"
+        ") -> sql.Composed:\n"
+        "    dist = _distance_expr(metric, use_operator)\n"
+        "    order = _order_expr(dist, use_operator)\n"
+        "    return sql.SQL(\n"
+        "        \"EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) \"\n"
+        "        \"SELECT id, label, {dist} AS distance \"\n"
+        "        \"FROM {t} \"\n"
+        "        \"ORDER BY {order} \"\n"
+        "        \"LIMIT {k}\"\n"
+        "    ).format(\n"
+        "        dist=dist,\n"
+        "        order=order,\n"
+        "        t=sql.Identifier(train_table(dataset_id)),\n"
+        "        k=sql.Literal(k),\n"
+        "    )\n"
+        "\n"
+        "",
         caption="Listing 21 — The retrieval query builder.",
     )
 
@@ -1596,8 +1652,12 @@ def build_backend(doc) -> None:
             ["hnsw_m / hnsw_ef_construction", "16 / 64", "Build parameters"],
             ["max_queries", "2,000", "How many distinct test vectors to query"],
             ["repetitions", "1", "Complete timed passes over that query set"],
-            ["seed", "None", "Seed recorded for reproducibility"],
+            ["seed", "0", "Seed recorded for reproducibility"],
             ["tie_tolerance", "1e-6 / 1e-6", "Relative and absolute tie tolerance"],
+            ["query_sampling", "'first'", "'first' or 'stratified' query selection"],
+            ["query_sample_seed", "0", "Seed for within-class query sampling"],
+            ["benchmark_round / position", "None", "Balanced-round metadata from the runner"],
+            ["benchmark_seed / order", "None", "Seed and full order of that round"],
             ["name", "None", "A label for the run"],
             ["weighted_voting", "False", "Distance-weighted voting"],
         ],
@@ -1612,7 +1672,8 @@ def build_backend(doc) -> None:
     )
     numbered(
         doc,
-        "Load the query vectors and their true labels from the query pool.",
+        "Select test ids with the configured mode and seed, load those vectors "
+        "and persist the ids and both class distributions.",
     )
     numbered(
         doc,
@@ -1648,7 +1709,15 @@ def build_backend(doc) -> None:
     numbered(
         doc,
         "Persist the experiment row, one experiment_repetitions row per pass "
-        "and one query_latencies row per measured query.",
+        "and one query_latencies row per measured query, then write the "
+        "non-overlapping timing fields back to the experiment row.",
+    )
+    p(
+        doc,
+        "The exact query orders by (distance, id) so repeated exact retrieval is "
+        "deterministic when distances tie. The HNSW query deliberately keeps "
+        "only the index-compatible distance ordering; adding an id sort would "
+        "make the planner abandon the index.",
     )
     p(
         doc,
@@ -1797,10 +1866,13 @@ def build_backend(doc) -> None:
         "    --ef-search 10,25,50,100,200,400 \\\n"
         "    --k 5 --metric l2 --max-queries 1000 \\\n"
         "    --repetitions 3 --seed 0 \\\n"
+        "    --rounds 3 --order-seed 0 \\\n"
+        "    --query-sampling stratified --query-sample-seed 0 \\\n"
         "    --output ..\\docs\\results\\sweep.csv \\\n"
         "    --json   ..\\docs\\results\\sweep.json \\\n"
         "    --repetition-details ..\\docs\\results\\repetition_details.csv \\\n"
-        "    --repetition-summary ..\\docs\\results\\repetition_summary.csv",
+        "    --repetition-summary ..\\docs\\results\\repetition_summary.csv \\\n"
+        "    --query-samples ..\\docs\\results\\query_samples.json",
         caption="Listing 24 — Running the experiment matrix.",
     )
     p(
@@ -1813,15 +1885,17 @@ def build_backend(doc) -> None:
     )
     p(
         doc,
-        "The runner also enforces four guarantees that are easy to lose when "
-        "results are produced by hand. It writes 52 columns, including the "
-        "distinction between unique queries, repetitions and stored "
-        "observations. It reads the per-repetition rows back from the database "
-        "before writing the repetition artefacts, so the CSVs cannot drift from "
-        "the persisted run. It prints a warning when an HNSW row reports "
-        "used_index_scan = False. And it records index_reused together with a "
-        "NULL index_build_ms on reuse, so a later ef_search row never claims a "
-        "historical build as a fresh cost.",
+        "The runner enforces six guarantees that are easy to lose when results "
+        "are produced by hand. It writes 64 columns, separating unique queries, "
+        "repetitions, rounds and stored observations. It selects queries by a "
+        "seeded stratified sample, persists their ids and exports them to "
+        "query_samples.json. It executes the matrix in seeded balanced rounds "
+        "so every configuration runs early and late, without rebuilding the "
+        "index between ef_search values. It reads the per-repetition rows back "
+        "from the database before writing the repetition artefacts. It prints a "
+        "warning when a HNSW row reports used_index_scan = False. And it records "
+        "index_reused together with a NULL index_build_ms on reuse. The v1 "
+        "artifacts remain under docs/results/v1 for comparison.",
     )
 
     h2(doc, "4.11 The Test Suite")
@@ -1862,16 +1936,43 @@ def build_backend(doc) -> None:
                 "accounting",
             ],
             [
+                "test_benchmark_order.py",
+                "Seeded balanced rounds: one run per configuration per round, "
+                "reproducibility, seed variation and early/late coverage",
+            ],
+            [
+                "test_query_sampling.py",
+                "Stratified query ids, seed reproducibility, rare classes, "
+                "class proportions, no train/test overlap and persistence",
+            ],
+            [
+                "test_timing_accounting.py",
+                "Non-overlapping phase intervals, retrieval totals matching "
+                "stored samples, fresh build versus reuse",
+            ],
+            [
+                "test_exact_tie_breaking.py",
+                "Deterministic exact ids on tied data, HNSW index preservation "
+                "and tie-aware recall credit",
+            ],
+            [
+                "test_tie_tolerance_metrics.py",
+                "L2, cosine and L1 tolerance cases: exact ties, near/far "
+                "distances, tiny and large boundaries, >K candidates",
+            ],
+            [
                 "test_run_experiments.py",
                 "The runner's field set, CSV/JSON agreement, persisted latency "
-                "count, per-repetition rows and a full main() smoke test",
+                "count, balanced rounds and a full main() smoke test",
             ],
         ],
         widths=[5.0, 10.5],
     )
     p(
         doc,
-        "The suite contains 164 tests and runs against a real PostgreSQL + "
+        "The suite contains 211 passing tests and one documented skip (cosine "
+        "distance is discrete for collinear vectors, so a near-zero non-zero "
+        "boundary cannot be constructed). It runs against a real PostgreSQL + "
         "pgvector instance; nothing is mocked, because a mocked vector store "
         "would not prove that pgvector's planner behaves as assumed. The "
         "integration tests are skipped automatically when PostgreSQL is "

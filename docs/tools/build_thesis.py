@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import sys
 from pathlib import Path
+from statistics import mean
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -64,6 +65,44 @@ def pick(rows: list[dict], size: int, method: str, ef: int | None):
         ):
             return row
     return None
+
+
+_MEAN_FIELDS = (
+    "recall_at_k", "tie_aware_recall_at_k", "accuracy", "precision_macro",
+    "recall_macro", "macro_f1", "latency_avg_ms", "latency_p50_ms",
+    "latency_p95_ms", "latency_p99_ms", "speedup_p50", "speedup_avg",
+)
+
+
+def aggregate_rounds(rows: list[dict]) -> list[dict]:
+    """Collapse balanced rounds into one row per (size, method, ef).
+
+    Means are used for measured quantities; index build time and size are
+    taken from the first run that reported them, because a reuse row
+    deliberately leaves the fresh-build fields empty.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        key = (row["train_size"], row["retrieval_method"], row["hnsw_ef_search"])
+        groups.setdefault(key, []).append(row)
+
+    aggregated: list[dict] = []
+    for key, items in groups.items():
+        out = dict(items[0])
+        for field in _MEAN_FIELDS:
+            values = [
+                float(item[field])
+                for item in items
+                if item.get(field) not in (None, "")
+            ]
+            out[field] = mean(values) if values else None
+        for field in ("index_build_ms", "index_created_ms", "index_size_bytes"):
+            for item in items:
+                if item.get(field) not in (None, ""):
+                    out[field] = item[field]
+                    break
+        aggregated.append(out)
+    return aggregated
 
 
 def fmt_pct(value: float | str | None, digits: int = 2) -> str:
@@ -155,11 +194,14 @@ def build_abstract(doc) -> None:
         "compares the two retrieval strategies in terms of neighbour-retrieval "
         "recall, classification quality (accuracy, macro precision, macro recall "
         "and macro F1), and per-query latency. Across training-set sizes of "
-        "10,000 and 50,000 rows, HNSW retrieval achieved between 98.2% and "
+        "10,000 and 50,000 rows, HNSW retrieval achieved between 99.0% and "
         "100.0% Recall@K over the tested search-effort values, while reducing "
-        "median query latency by a factor of 3.0 to 48.8 relative to the exact "
+        "median query latency by a factor of 3.0 to 45.2 relative to the exact "
         "baseline. Classification accuracy differed from the exact baseline by "
-        "at most 0.2 percentage points in either direction.",
+        "at most 0.1 percentage points. The benchmark used three seeded "
+        "balanced rounds and a class-stratified sample of 1,000 held-out "
+        "queries, so execution order and query composition are recorded rather "
+        "than assumed neutral.",
     )
     p(
         doc,
@@ -169,7 +211,7 @@ def build_abstract(doc) -> None:
         "the accuracy difference is much smaller than the recall difference. A "
         "second observation is that the benefit of approximation is not a "
         "constant factor but grows with the table: the measured speed-up "
-        "widened from 13.1× at 10,000 rows to 48.8× at 50,000 rows at the "
+        "widened from 12.9× at 10,000 rows to 45.2× at 50,000 rows at the "
         "lowest search effort. These results identify conditions under which "
         "approximate vector search provides a practical benefit for classical "
         "machine learning workloads. They are measurements from one dataset and "
@@ -1199,6 +1241,7 @@ def build_chapter_4(doc) -> None:
 
 def build_chapter_5(doc, rows: list[dict]) -> None:
     h1(doc, "5. Results and Discussion")
+    rows = aggregate_rounds(rows)
 
     h2(doc, "5.1 Experimental Setup")
     table(
@@ -1214,13 +1257,15 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
             ],
             ["Training pool sizes", "9,999 and 50,000 rows (stratified subsample)"],
             ["Held-out test pool", "3,000 rows (1,000 unique queries per run)"],
+            ["Query sampling", "seeded stratified, query_sample_seed = 0"],
             ["k", "5"],
             ["Distance metric", "L2 (Euclidean)"],
             ["HNSW build parameters", "m = 16, ef_construction = 64"],
             ["Search-effort values", "10, 25, 50, 100, 200, 400"],
             ["Repetitions", "3 complete passes, identical query order"],
-            ["Latency observations", "3,000 per configuration"],
-            ["Warm-up", "1 discarded query per batch"],
+            ["Benchmark rounds", "3 seeded balanced rounds, order_seed = 0"],
+            ["Latency observations", "9,000 per configuration (1,000 × 3 × 3)"],
+            ["Warm-up", "1 discarded query per batch; warm buffer cache"],
             ["Dataset fingerprint", "9,999 rows: af656f7b…; 50,000 rows: 6baa8fa2…"],
             [
                 "Environment",
@@ -1266,7 +1311,7 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
             "Build (ms)",
         ],
         table_rows,
-        caption="Table 9 — All measured configurations.",
+        caption="Table 9 — All measured configurations, averaged over three balanced rounds.",
         widths=[1.7, 1.4, 1.0, 1.8, 1.8, 1.8, 1.7, 1.6, 1.6, 1.6],
         font_size=7.5,
     )
@@ -1313,12 +1358,12 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
     p(
         doc,
         "Approximate search reduced median query latency by a factor of 3.0 to "
-        "48.8 depending on the configuration. The reduction is not marginal: at "
-        "the most aggressive search effort the approximate method answered a "
-        "query in 0.230 ms where the exact method required 11.226 ms, a 48.8-fold "
+        "45.2 depending on the configuration. The reduction is not marginal: at "
+        "the lowest search effort the approximate method answered a "
+        "query in 0.240 ms where the exact method required 10.812 ms, a 45.2-fold "
         "difference. Every HNSW row was confirmed by query-plan inspection to "
         "have used the HNSW index scan and to have applied the requested "
-        "ef_search, while both exact rows reported a sequential scan; the "
+        "ef_search, while every exact row reported a sequential scan; the "
         "figures therefore reflect the intended access paths rather than a "
         "silent fallback or a discarded setting.",
     )
@@ -1326,11 +1371,11 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
     h2(doc, "5.4 RQ2 — Retrieval Accuracy of HNSW")
     p(
         doc,
-        "Recall@K against the exact ground truth ranged from 98.2% to 100.0% "
-        "across the configurations. At 50,000 rows it rose from 98.22% at "
+        "Recall@K against the exact ground truth ranged from 99.02% to 100.00% "
+        "across the configurations. At 50,000 rows it rose from 99.02% at "
         "ef_search = 10 to 99.78% at ef_search = 50 and 99.98% at ef_search = "
         "100, then stayed at 99.98% through ef_search = 400. At 9,999 rows the "
-        "curve starts higher, at 99.52% for ef_search = 10, and reaches 100.00% "
+        "curve starts higher, at 99.38% for ef_search = 10, and reaches 100.00% "
         "at ef_search = 100.",
     )
     p(
@@ -1388,20 +1433,20 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
     )
     p(
         doc,
-        "At 50,000 rows and ef_search = 10, the approximate method missed 1.78 "
-        "percentage points of exact neighbours while accuracy moved from 85.60% "
-        "to 85.50%, a change of 0.10 points. At ef_search = 25 and above, "
-        "accuracy is 85.70–85.80% and macro F1 74.00–74.03%, slightly above the "
-        "exact baseline's 85.60% and 73.14%.",
+        "At 50,000 rows and ef_search = 10, the approximate method missed 0.98 "
+        "percentage points of exact neighbours while accuracy moved from 85.30% "
+        "to 85.20%, a change of 0.10 points. At ef_search = 25 and above, "
+        "accuracy is 85.20% and macro F1 71.62%, while the exact baseline reached "
+        "85.30% and 71.66%.",
     )
     p(
         doc,
         "That direction of change must not be over-read. With 1,000 queries a "
         "difference of 0.1 percentage points is one query, so these small "
-        "positive differences are not evidence that approximation improves "
+        "differences are not evidence that approximation helps or hurts "
         "classification. The defensible statement is narrower: in this sweep the "
-        "classification difference is at most 0.2 percentage points in either "
-        "direction while the retrieval gap reaches 1.78 points.",
+        "classification difference is at most 0.1 percentage points while the "
+        "retrieval gap reaches 0.98 points.",
     )
     p(
         doc,
@@ -1418,12 +1463,14 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
         "The macro figures tell a complementary story, but a smaller one than "
         "was previously reported. Because CoverType is heavily imbalanced, "
         "accuracy is dominated by the majority classes while macro F1 weights "
-        "all seven equally. In this sweep the two move together: at 50,000 rows "
-        "and ef_search = 10 both accuracy and macro F1 are 0.10 points below the "
-        "exact row, and at higher effort both are slightly above it. The "
-        "measured data therefore do not support a claim that approximation "
-        "specifically harms minority classes on this workload; that remains a "
-        "reasonable concern to monitor, not a finding of this experiment.",
+        "all seven equally. In this sweep the two move in the same direction at "
+        "high effort: at 50,000 rows above ef_search = 25 both are within 0.04 "
+        "points of the exact row. At ef_search = 10, macro F1 is 0.18 points "
+        "*above* the exact baseline while accuracy is 0.10 points below, a "
+        "difference of roughly two queries. The measured data therefore do not "
+        "support a claim that approximation specifically harms minority classes "
+        "on this workload; that remains a reasonable concern to monitor, not a "
+        "finding of this experiment.",
     )
 
     h2(doc, "5.6 RQ4 — Influence of the Search-Effort Parameter")
@@ -1441,25 +1488,23 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
         doc,
         "The measured curve supports such an operating point, with a caveat "
         "about how flat it is. On the 50,000-row dataset, ef_search = 50 "
-        "recovers 99.78% of the true neighbours for a 33.9-fold median-latency "
-        "reduction, and ef_search = 100 recovers 99.98% for 25.4-fold. Going "
-        "further to 400 buys the same 99.98% recall for a 10.4-fold reduction, "
-        "so higher effort beyond this point is pure cost on this workload. The "
-        "useful range is narrower than it would be on a dataset where recall "
-        "degrades steeply at low effort.",
+        "recovers 99.78% of the true neighbours for a 32.1-fold median-latency "
+        "reduction, and ef_search = 100 recovers 99.98% for 23.5-fold. Going "
+        "further to 400 buys the same 99.98% recall for only a 9.4-fold "
+        "reduction, so higher effort beyond this point is pure cost on this "
+        "workload. The useful range is narrower than it would be on a dataset "
+        "where recall degrades steeply at low effort.",
     )
     p(
         doc,
-        "The repetition data add a second observation that the aggregate row "
-        "hides. Across three complete passes, recall, accuracy and macro F1 were "
-        "identical in every configuration, while per-repetition mean latency "
-        "varied with a standard deviation between 0.0013 ms and 0.20 ms. The "
-        "largest relative dispersion was 6.9% (9,999 rows, ef_search = 25, mean "
-        "0.264 ms); most configurations were below 3%. With only three passes the "
-        "95% interval is wide — for 50,000 rows at ef_search = 100 the "
-        "per-repetition mean is 0.465 ms with an interval of [0.415, 0.516] ms — "
-        "so between-pass differences of a few hundredths of a millisecond are "
-        "not resolved by this design.",
+        "The repetition and round data add a second observation that the "
+        "aggregate row hides. Across three complete passes, recall, accuracy "
+        "and macro F1 were identical in every configuration, while the p50 "
+        "latency varied between rounds with a standard deviation of 0.001 ms "
+        "to 0.017 ms. The largest relative spread was about 6 % (50,000 rows, "
+        "ef_search = 10, mean 0.240 ms). Three passes over the same queries are "
+        "correlated observations of run-to-run variability, not independent "
+        "samples of the held-out population.",
     )
 
     h2(doc, "5.7 RQ5 — Influence of Dataset Size")
@@ -1502,11 +1547,11 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
     p(
         doc,
         "Between 9,999 and 50,000 rows the exact baseline's median latency grew "
-        "from 2.769 ms to 11.226 ms, a factor of 4.05 for a factor of 5.0 in "
+        "from 2.765 ms to 10.812 ms, a factor of 3.91 for a factor of 5.0 in "
         "data — close to linear, as a sequential scan over a growing table "
         "should be. The HNSW median latency at ef_search = 10 grew only from "
-        "0.211 ms to 0.230 ms, a factor of 1.09. The speed-up accordingly widened "
-        "from 13.1× to 48.8×.",
+        "0.214 ms to 0.240 ms, a factor of 1.12. The speed-up accordingly widened "
+        "from 12.9× to 45.2×.",
     )
     p(
         doc,
@@ -1515,10 +1560,10 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
         "practical consequence. Approximate retrieval is not merely a "
         "constant-factor optimisation that becomes worth adopting at some "
         "threshold; its relative advantage grows with the table. The cost side is "
-        "a one-off index construction, 597.6 ms at 9,999 rows and 3,239.0 ms at "
+        "a one-off index construction, 574.0 ms at 9,999 rows and 3,231.1 ms at "
         "50,000 rows, which is amortised over every subsequent query. The index "
-        "was reused for the five remaining ef_search values at each size, "
-        "recorded as index_reused = true with a NULL current build time.",
+        "was reused for every later configuration and round, recorded as "
+        "index_reused = true with a NULL current build time.",
     )
 
     h2(doc, "5.8 Duplicate Vectors and Boundary Ties")
@@ -1582,16 +1627,29 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
     )
     p(
         doc,
-        "The performance gain is substantial and grows with scale: a 48.8-fold "
+        "The performance gain is substantial and grows with scale: a 45.2-fold "
         "reduction in median query latency at 50,000 training rows and the "
         "lowest search effort. The classification cost is small but not zero: "
-        "at most 0.2 percentage points of accuracy in either direction in this "
-        "sweep, and the difference is not statistically meaningful with 1,000 "
-        "queries. Whether that constitutes “acceptable” classification quality "
-        "is a domain decision rather than a technical one, but the measurements "
-        "make the decision possible: the platform exposes the entire trade-off "
-        "so that an operating point can be chosen with evidence rather than "
-        "intuition.",
+        "at most 0.1 percentage points of accuracy in this sweep, and the "
+        "difference is not statistically meaningful with 1,000 queries. Whether "
+        "that constitutes “acceptable” classification quality is a domain "
+        "decision rather than a technical one, but the measurements make the "
+        "decision possible: the platform exposes the entire trade-off so that "
+        "an operating point can be chosen with evidence rather than intuition.",
+    )
+    p(
+        doc,
+        "Benchmark interpretation must separate five effects. Query sampling "
+        "changed accuracy from the v1 figures because a different 1,000 queries "
+        "were evaluated; it did not change the method. Balanced rounds remove a "
+        "fixed exact-first ordering confound, but every run still used a warm "
+        "buffer cache and no cold-cache claim is made. Three repetitions over "
+        "the same queries measure run-to-run timing variability, not sampling "
+        "error. Retrieval approximation is quantified by Recall@K; classification "
+        "quality by accuracy and macro F1; and index construction and storage are "
+        "one-off costs reported separately from query latency. None of these "
+        "effects licenses a generalisation of these Covertype speed-ups to every "
+        "dataset.",
     )
     h3(doc, "5.9.2 Practical recommendations")
     numbered(
@@ -1605,14 +1663,14 @@ def build_chapter_5(doc, rows: list[dict]) -> None:
         doc,
         "Adopt approximate search as the default for larger tables, with "
         "ef_search = 50 or 100 as a starting point: at 50,000 rows those values "
-        "recover 99.78% and 99.98% of the true neighbours for 33.9-fold and "
-        "25.4-fold median-latency reductions. Tune from the measured curve "
+        "recover 99.78% and 99.98% of the true neighbours for 32.1-fold and "
+        "23.5-fold median-latency reductions. Tune from the measured curve "
         "rather than from a fixed default.",
     )
     numbered(
         doc,
         "Report retrieval and classification metrics separately. On this "
-        "workload the retrieval gap reached 1.78 points while accuracy moved by "
+        "workload the retrieval gap reached 0.98 points while accuracy moved by "
         "0.1 points; quoting only one of them would misrepresent the other.",
     )
     numbered(
@@ -1648,14 +1706,14 @@ def build_chapter_6(doc) -> None:
         doc,
         "The experimental evidence supports the central hypothesis for this "
         "workload. Approximate retrieval delivered median-latency reductions of "
-        "3.0× to 48.8× over the exact baseline, with the benefit growing as the "
+        "3.0× to 45.2× over the exact baseline, with the benefit growing as the "
         "training pool scaled, while the classification difference stayed "
-        "within 0.2 percentage points in either direction.",
+        "within 0.1 percentage points.",
     )
     p(
         doc,
         "The most useful conceptual finding is the asymmetry between retrieval "
-        "quality and classification quality. Recall@5 fell by as much as 1.78 "
+        "quality and classification quality. Recall@5 fell by as much as 0.98 "
         "points while accuracy moved by 0.1 points, because a majority vote "
         "over k = 5 neighbours is insensitive to the loss of an individual "
         "neighbour unless that loss flips the vote. This suggests that "
@@ -1676,8 +1734,15 @@ def build_chapter_6(doc) -> None:
         "defect produced plausible output. The corrected pipeline executes and "
         "stores every repetition, forces the exact baseline through the "
         "distance function, verifies the access path and the applied parameter, "
-        "and separates fresh build time from reuse. Those checks, not the "
-        "headline speed-up, are what make the measurements trustworthy.",
+        "and separates fresh build time from reuse. The final audit additionally "
+        "found a fixed configuration order that confounded cache conditions, a "
+        "mislabelled runtime residual, first-id query selection, and non-"
+        "deterministic tie-breaking in the general exact query. The corrected "
+        "pipeline uses seeded balanced rounds, seeded stratified queries with "
+        "persisted ids, an explicit timing decomposition, and (distance, id) "
+        "ordering on the exact path while keeping the HNSW path index-compatible. "
+        "Those checks, not the headline speed-up, are what make the measurements "
+        "trustworthy.",
     )
 
     h2(doc, "6.2 Limitations")
@@ -1701,9 +1766,14 @@ def build_chapter_6(doc) -> None:
             "is an observation about this pgvector build with a fixed graph and "
             "query order, not a general claim that HNSW search is "
             "deterministic.",
-            "Only 1,000 of the 3,000 held-out rows are evaluated per run; a "
-            "difference of 0.1 percentage points corresponds to one query, so "
-            "differences of that size are not interpreted as effects.",
+            "Only 1,000 of the 3,000 held-out rows are evaluated per run, using "
+            "a seeded stratified sample. A difference of 0.1 percentage points "
+            "corresponds to one query, so differences of that size are not "
+            "interpreted as effects; changing the sample changes the measured "
+            "accuracy even when the method does not.",
+            "Balanced rounds address configuration order, not cache state. All "
+            "runs used a warm buffer cache and no cold-cache procedure was "
+            "executed, so cold-start performance is not reported.",
             "The k sweep was not run at scale; the expectation that larger k "
             "narrows the accuracy gap is stated in the experiment plan but is "
             "not supported by the data presented here.",
@@ -1816,15 +1886,16 @@ def build_appendices(doc) -> None:
         "│   │   ├── core/         Settings and connection pool\n"
         "│   │   ├── db/           Schema and bootstrap\n"
         "│   │   └── services/     Research logic\n"
+        "│   │       ├── benchmark_order.py  Balanced benchmark rounds\n"
         "│   │       ├── classification.py   Voting, metrics, tie-aware recall\n"
         "│   │       ├── dataset_stats.py    Fingerprint, duplicates, ties\n"
         "│   │       ├── datasets.py         Acquisition and splitting\n"
-        "│   │       ├── experiments.py      Orchestration\n"
+        "│   │       ├── experiments.py      Orchestration and phase timing\n"
         "│   │       ├── metrics.py          Distance metrics\n"
         "│   │       ├── preprocessing.py    Feature transformation\n"
         "│   │       └── vector_store.py     Exact and HNSW retrieval\n"
         "│   ├── scripts/                    Batch runner, dataset statistics\n"
-        "│   └── tests/                      164 automated tests\n"
+        "│   └── tests/                      211 passing, 1 skipped\n"
         "├── frontend/\n"
         "│   ├── app/[locale]/      Overview, Datasets, Experiments, Compare, Methodology\n"
         "│   ├── components/        UI library and feature components\n"
@@ -1863,10 +1934,13 @@ def build_appendices(doc) -> None:
         "    --ef-search 10,25,50,100,200,400 `\n"
         "    --k 5 --metric l2 --max-queries 1000 `\n"
         "    --repetitions 3 --seed 0 `\n"
+        "    --rounds 3 --order-seed 0 `\n"
+        "    --query-sampling stratified --query-sample-seed 0 `\n"
         "    --output ..\\docs\\results\\sweep.csv `\n"
         "    --json ..\\docs\\results\\sweep.json `\n"
         "    --repetition-details ..\\docs\\results\\repetition_details.csv `\n"
-        "    --repetition-summary ..\\docs\\results\\repetition_summary.csv\n"
+        "    --repetition-summary ..\\docs\\results\\repetition_summary.csv `\n"
+        "    --query-samples ..\\docs\\results\\query_samples.json\n"
         "\n"
         "# 5. Verify the implementation\n"
         ".venv\\Scripts\\python -m pytest",

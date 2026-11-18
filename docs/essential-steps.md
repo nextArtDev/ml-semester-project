@@ -315,8 +315,9 @@ Remaining:
 4. `docs/api.md` — new request/response fields and the `/repetitions` endpoint.
 5. `docs/results/README.md` — regenerated sweep, class-distribution comparison,
    round positions, timing decomposition, tie-aware results and v1 comparison.
-6. Word documents: regeneration deferred until after the new benchmark is
-   verified, per the audit instruction. They are not claimed to be updated.
+6. Both Word documents regenerated through `docs/tools/build_thesis.py` /
+   `build_guide.py` after the new benchmark was verified; `verify_snippets.py`
+   reports zero divergent code blocks in each.
 
 **Acceptance check** — `verify_snippets.py` reports zero mismatches and no
 document contains a number that cannot be traced to `docs/results/*.csv`,
@@ -353,15 +354,15 @@ document contains a number that cannot be traced to `docs/results/*.csv`,
       `repetition_summary.csv` / `query_samples.json` regenerated from the
       corrected pipeline, with v1 preserved.
 - [x] Timing decomposition replaces `api_overhead_s`.
-- [ ] Word documents regenerated to match the new benchmark.
+- [x] Word documents regenerated to match the new benchmark.
 - [x] Conventional and tie-aware Recall@K both implemented, persisted and
       reported; tie tolerance documented.
 - [x] Duplicate-vector and boundary-tie statistics measured for the pool and
       recorded in `duplicate_stats.json`.
 - [ ] UI shows preprocessing mode, repetitions, applied `ef_search`, index
       size and plan verification, in EN and FA.
-- [ ] README, architecture, experiment plan, API doc match the code; Word
-      documents still need regeneration.
+- [x] README, architecture, experiment plan, API doc and both `.docx` files
+      match the code and the verified benchmark.
 - [x] Limitations stated honestly: warm cache, single machine,
       per-query round-trip, class imbalance, Covertype-only primary dataset,
       correlated repetitions and rounds, small query sample.
