@@ -29,6 +29,8 @@ from scripts.run_experiments import FIELDS, REPETITION_FIELDS, SUMMARY_FIELDS  #
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify benchmark artifacts.")
     parser.add_argument("--results-dir", default="../docs/results")
+    parser.add_argument("--details-name", default="repetition_details.csv")
+    parser.add_argument("--summary-name", default="repetition_summary.csv")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--expected-runs", type=int, default=42)
     parser.add_argument("--expected-rounds", type=int, default=3)
@@ -56,8 +58,8 @@ def main() -> int:
     directory = Path(args.results_dir)
     sweep_path = directory / "sweep.csv"
     json_path = directory / "sweep.json"
-    details_path = directory / "repetition_details.csv"
-    summary_path = directory / "repetition_summary.csv"
+    details_path = directory / args.details_name
+    summary_path = directory / args.summary_name
     samples_path = directory / "query_samples.json"
     orders_path = directory / "benchmark_orders.json"
 
@@ -179,7 +181,7 @@ def main() -> int:
 
     # --- repetition/summary/query artifacts -------------------------------
     expected_detail_ids: list[int] = []
-    for record in db_rows.values():
+    for record in db_by_id.values():
         expected_detail_ids.extend([int(record["id"])] * args.expected_repetitions)
     check(sorted(int(r["experiment_id"]) for r in details) == sorted(expected_detail_ids),
           "repetition_details does not cover every experiment/repetition")
