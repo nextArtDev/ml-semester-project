@@ -111,6 +111,11 @@ Runs one experiment.
   "hnsw_ef_construction": 64,
   "max_queries": 2000,
   "repetitions": 3,
+  "seed": 0,
+  "query_sampling": "stratified",
+  "query_sample_seed": 0,
+  "tie_tolerance_relative": 1e-6,
+  "tie_tolerance_absolute": 1e-6,
   "name": "HNSW ef=100 k=5",
   "weighted_voting": false
 }
@@ -125,14 +130,21 @@ Runs one experiment.
 | `ef_search` | int \| null | `hnsw.ef_search`, 1–1000. Query-time only. |
 | `hnsw_m` | int | Build parameter — changing it forces an index rebuild |
 | `hnsw_ef_construction` | int | Build parameter |
-| `max_queries` | int \| null | Number of unique test vectors to query |
+| `max_queries` | int \| null | Number of distinct test vectors to query |
 | `repetitions` | int | Complete timed passes over that query set, 1–100 |
+| `seed` | int | Reproducibility seed recorded on the run |
+| `query_sampling` | `first` \| `stratified` | Stratified is the documented default for new artifacts |
+| `query_sample_seed` | int | Seed for within-class query sampling |
+| `tie_tolerance_relative` | float | Relative term of the boundary tolerance |
+| `tie_tolerance_absolute` | float | Absolute term of the boundary tolerance |
 | `weighted_voting` | bool | Distance-weighted majority voting |
 
 `repetitions` is not a counter multiplier: the whole query set is executed
 `repetitions` times and every latency is stored. A request with
 `max_queries = 2000` and `repetitions = 3` stores 6,000 `query_latencies` rows
 and 3 `experiment_repetitions` rows. One warm-up query is discarded.
+`query_sampling = "stratified"` allocates query slots by class and persists the
+selected ids and both class distributions.
 
 Response (abridged):
 
@@ -157,6 +169,15 @@ Response (abridged):
   "index_size_bytes": 5234688,
   "dataset_fingerprint": "6baa8fa283ea5a8267d3e964eedf5d2a",
   "seed": 0,
+  "query_sampling": "stratified",
+  "query_sample_seed": 0,
+  "evaluated_query_ids": [1, 3, 7, 9, 11],
+  "test_pool_class_distribution": {"0": 1094, "1": 1463},
+  "evaluated_class_distribution": {"0": 364, "1": 490},
+  "benchmark_round": null,
+  "benchmark_position": null,
+  "benchmark_seed": null,
+  "warm_cache": true,
   "recall_at_k": 0.9527,
   "tie_aware_recall_at_k": 0.9527,
   "tied_queries": 0,
@@ -166,6 +187,15 @@ Response (abridged):
   "latency_p50_ms": 0.3746,
   "latency_p95_ms": 0.4462,
   "used_index_scan": true,
+  "total_experiment_runtime_s": 12.34,
+  "index_preparation_s": 0.01,
+  "index_build_s": 0.0,
+  "ground_truth_computation_s": 8.12,
+  "retrieval_total_s": 1.14,
+  "retrieval_mean_per_query_ms": 0.38,
+  "metrics_computation_s": 0.01,
+  "persistence_s": 0.05,
+  "orchestration_overhead_s": 2.99,
   "confusion_matrix": [[...]],
   "per_class_metrics": [{ "label": 1, "precision": 0.8, "recall": 0.72, "f1": 0.76, "support": 125 }]
 }
@@ -176,6 +206,13 @@ Response (abridged):
 > it is `null`, `index_reused` is `true`, and the historical duration is in
 > `index_reused_build_ms`. The reported `hnsw_m` / `hnsw_ef_construction` come
 > from the live index, not from the request defaults.
+>
+> The timing fields are non-overlapping `perf_counter` intervals. `index_build_s`
+> is 0 when the index was reused, and is a subset of `index_preparation_s`.
+> The legacy `api_overhead_s` is no longer written: it was total runtime minus
+> query time and therefore included ground-truth computation and orchestration.
+> `benchmark_*` fields are populated by the batch runner; direct API calls
+> leave them `null`.
 
 ### `GET /api/experiments/{id}/repetitions`
 

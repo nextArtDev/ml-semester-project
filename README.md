@@ -23,15 +23,16 @@ ml-semester-project/
 │   │   ├── core/     Settings + connection pool
 │   │   ├── db/       Schema definition and bootstrap
 │   │   └── services/ The research logic
+│   │       ├── benchmark_order.py  Seeded balanced benchmark rounds
 │   │       ├── classification.py   Majority voting + metrics (incl. tie-aware Recall@K)
 │   │       ├── dataset_stats.py    Fingerprint, duplicate-vector and tie statistics
 │   │       ├── datasets.py         Ingestion, splitting, Covertype loader
-│   │       ├── experiments.py      Orchestration + persistence
+│   │       ├── experiments.py      Orchestration + persistence + phase timing
 │   │       ├── metrics.py          Distance metric definitions
 │   │       ├── preprocessing.py    Leakage-free preprocessing
 │   │       └── vector_store.py     Exact vs HNSW retrieval (pgvector)
 │   ├── scripts/                    Batch runner + dataset statistics
-│   └── tests/        pytest suite (164 tests)
+│   └── tests/        pytest suite (211 passed, 1 skip)
 ├── frontend/         Next.js 16 + TypeScript + Tailwind v4 (bilingual EN/FA)
 │   ├── app/[locale]/ Overview · Datasets · Experiments · Compare · Methodology
 │   ├── components/   UI + feature components
@@ -173,29 +174,48 @@ the first query of every batch and reported in the UI. A HNSW run whose plan
 did not use the named index is never counted as an HNSW result; the batch
 runner prints a warning when that happens.
 
-### Repetitions and counts
+### Repetitions, rounds and counts
 
-`--repetitions N` executes **N complete timed passes** over the same query
-set, in the same query order. It is not a multiplier applied to a counter.
+`--repetitions N` executes **N complete timed passes** over the same query set,
+in the same query order. It is not a multiplier applied to a counter.
 Every individual latency is stored in `query_latencies` with its repetition
 number, so a run with 1,000 queries and 3 repetitions stores exactly 3,000
 rows. The warm-up query runs once, before the first timed query, and is never
 stored.
 
-Four quantities are reported separately:
+`--rounds R` runs the whole configuration matrix R times in a seeded, balanced
+order. Each round contains every configuration exactly once; with three or more
+rounds every configuration appears both early and late. The order is derived
+from `--order-seed`, persisted as `benchmark_round`, `benchmark_position`,
+`benchmark_seed` and `benchmark_order`, and exported in the sweep. The HNSW
+index is built once per pool and reused across `ef_search` values and rounds.
+
+Five quantities are reported separately:
 
 | Quantity | Example |
 | --- | --- |
 | Held-out test pool | 3,000 rows |
 | Unique evaluated queries | 1,000 |
 | Repetitions | 3 |
-| Latency observations | 3,000 |
+| Benchmark rounds | 3 |
+| Latency observations | 1,000 × 3 × 3 = 9,000 per configuration |
 
 Repetitions expose run-to-run variability. They are **not** independent
-samples of a population: the query set, order and index are held fixed. The
-per-repetition metrics are written to `experiment_repetitions`; cross-
-repetition medians, standard deviations and 95 % intervals are exported
-alongside the sweep.
+samples of a population: the query set, order and index are held fixed. Rounds
+change configuration order, not the query sample. Per-repetition metrics are
+written to `experiment_repetitions`; cross-repetition medians, standard
+deviations and 95 % intervals are exported alongside the sweep.
+
+### Query selection
+
+The default runner mode is a seeded **stratified** sample: class slots are
+allocated by largest remainder and rows are sampled within each class with a
+seed derived from `--query-sample-seed` and the class label. The selected ids
+are identical for the exact and every HNSW run, are persisted as
+`evaluated_query_ids`, and are exported to `query_samples.json` together with
+the pool and evaluated class distributions. The legacy `first` mode remains
+available for reproducing older runs. Use `--max-queries 0` to evaluate the
+whole held-out pool.
 
 ### Measured metrics
 
@@ -206,6 +226,7 @@ alongside the sweep.
 | Retrieval | Tie-aware Recall@K against every id tied at the K-th distance (documented tolerance) |
 | Latency | Average, median, p95, p99 per query, over every recorded observation |
 | Index | Fresh build time, reuse flag, size, detected access path |
+| Timing | Total runtime and separate index preparation, ground truth, retrieval, metrics, persistence and orchestration intervals |
 
 Conventional Recall@K counts an equally distant but differently identified
 neighbour as a miss. Tie-aware Recall@K treats every id within
@@ -245,37 +266,63 @@ cd backend
     --k 5 --metric l2 `
     --max-queries 1000 `
     --repetitions 3 --seed 0 `
+    --rounds 3 --order-seed 0 `
+    --query-sampling stratified --query-sample-seed 0 `
     --output ..\docs\results\sweep.csv `
     --json ..\docs\results\sweep.json `
     --repetition-details ..\docs\results\repetition_details.csv `
-    --repetition-summary ..\docs\results\repetition_summary.csv
+    --repetition-summary ..\docs\results\repetition_summary.csv `
+    --query-samples ..\docs\results\query_samples.json
 ```
 
-Measured output on dataset 116 (1,000 queries, 3 repetitions, L2, `k = 5`):
+The run prints one line per execution in balanced-round order. Aggregated over
+the three rounds, the measured output on dataset 116 was:
 
 ```
-    size   method   k    ef reps   recall      acc  macroF1     p50ms     p99ms   buildms   idx       x
--------------------------------------------------------------------------------------------------------
-    9999    exact   5     -    3   1.0000   0.7750   0.5069     2.769     3.728         - False       -
-    9999     hnsw   5    10    3   0.9952   0.7760   0.5070     0.211     0.331     597.6  True    13.1
-    9999     hnsw   5    25    3   0.9996   0.7750   0.5069     0.246     0.383         -  True    11.3
-    9999     hnsw   5    50    3   0.9998   0.7750   0.5069     0.297     0.443         -  True     9.3
-    9999     hnsw   5   100    3   1.0000   0.7750   0.5069     0.387     0.555         -  True     7.2
-    9999     hnsw   5   200    3   1.0000   0.7750   0.5069     0.564     0.786         -  True     4.9
-    9999     hnsw   5   400    3   1.0000   0.7750   0.5069     0.908     1.266         -  True     3.0
-   50000    exact   5     -    3   1.0000   0.8560   0.7314    11.226    12.596         - False       -
-   50000     hnsw   5    10    3   0.9822   0.8550   0.7309     0.230     0.358    3239.0  True    48.8
-   50000     hnsw   5    25    3   0.9926   0.8580   0.7403     0.269     0.413         -  True    41.7
-   50000     hnsw   5    50    3   0.9978   0.8570   0.7400     0.331     0.490         -  True    33.9
-   50000     hnsw   5   100    3   0.9998   0.8570   0.7400     0.442     0.763         -  True    25.4
-   50000     hnsw   5   200    3   0.9998   0.8570   0.7400     0.655     0.993         -  True    17.1
-   50000     hnsw   5   400    3   0.9998   0.8570   0.7400     1.079     1.528         -  True    10.4
+   rows method  ef  recall    acc  macroF1    p50(ms)  speed-up
+   9999  exact   -  1.0000  0.7530   0.5255      2.765         -
+   9999   hnsw  10  0.9938  0.7530   0.5241      0.214      12.9x
+   9999   hnsw  25  0.9988  0.7530   0.5255      0.250      11.1x
+   9999   hnsw  50  0.9994  0.7530   0.5255      0.304       9.1x
+   9999   hnsw 100  1.0000  0.7530   0.5255      0.399       6.9x
+   9999   hnsw 200  1.0000  0.7530   0.5255      0.576       4.8x
+   9999   hnsw 400  1.0000  0.7530   0.5255      0.929       3.0x
+  50000  exact   -  1.0000  0.8530   0.7166     10.812         -
+  50000   hnsw  10  0.9902  0.8520   0.7184      0.240      45.2x
+  50000   hnsw  25  0.9966  0.8520   0.7162      0.274      39.5x
+  50000   hnsw  50  0.9978  0.8520   0.7162      0.337      32.1x
+  50000   hnsw 100  0.9998  0.8520   0.7162      0.461      23.5x
+  50000   hnsw 200  0.9998  0.8520   0.7162      0.683      15.8x
+  50000   hnsw 400  0.9998  0.8520   0.7162      1.147       9.4x
 ```
 
-`x` is the exact/HNSW median-latency ratio. The HNSW index is built once per
-pool size and **reused** across `ef_search` values; those rows record
+These figures use a stratified query sample and balanced rounds; they differ
+from the preserved v1 artifacts in [`docs/results/v1/`](docs/results/v1/README.md)
+and must not be mixed with them. The HNSW index is built once per pool size and
+**reused** across `ef_search` values and rounds; reused rows record
 `index_build_ms = NULL`, `index_reused = True`, and the original build time in
 `index_reused_build_ms`.
+
+### Timing fields
+
+`api_overhead_s` was removed from new artifacts because it charged ground-truth
+computation, index preparation, metrics and persistence to "API overhead". The
+replacement fields, all measured with `time.perf_counter()`, are:
+
+| Field | Definition |
+| --- | --- |
+| `total_experiment_runtime_s` | Start of `run_experiment` through persistence |
+| `index_preparation_s` | Build-or-reuse decision, `ANALYZE`, metadata readback |
+| `index_build_s` | Fresh `CREATE INDEX` only; a subset of the above and 0 on reuse |
+| `ground_truth_computation_s` | Exhaustive query and boundary candidates for all queries |
+| `retrieval_total_s` | Sum of the individually stored query latencies |
+| `retrieval_mean_per_query_ms` | Mean of those latencies |
+| `metrics_computation_s` | Majority vote, scores and cross-repetition summary |
+| `persistence_s` | Experiment, repetition and latency inserts |
+| `orchestration_overhead_s` | Residual: loading, counting, fingerprint, loop overhead |
+
+The intervals are non-overlapping and sum to at most the total. Actual HTTP
+request latency, if wanted, must be measured separately at the HTTP boundary.
 
 Dataset-level duplicate and tie statistics, used to interpret Recall@K:
 
@@ -294,12 +341,15 @@ cd backend
 .venv\Scripts\python -m pytest
 ```
 
-The suite contains **164 tests** and covers the classification/metric maths
-(including conventional and tie-aware Recall@K), the leakage contract of the
-preprocessing pipeline, the stratified splitting, and — against a live
-database — the exact/HNSW retrieval behaviour, index build/reuse
-bookkeeping, repetition accounting, persisted latency-row counts, tied
-boundary detection, and the batch runner's CSV/JSON consistency.
+The suite contains **211 passing tests and 1 documented skip** (cosine
+distance is discrete for collinear vectors, so a near-zero non-zero boundary
+cannot be constructed). It covers classification/metric maths, tie-aware and
+conventional Recall@K, tolerance validation for L2/cosine/L1, the leakage
+contract of preprocessing, stratified splitting and query selection, and —
+against a live database — exact/HNSW retrieval, deterministic tie-breaking,
+index build/reuse bookkeeping, repetition accounting, persisted latency-row
+counts, balanced execution order, timing decomposition and the batch runner's
+CSV/JSON consistency.
 
 ---
 

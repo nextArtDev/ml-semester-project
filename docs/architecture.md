@@ -78,6 +78,43 @@ pass, so the repetitions measure run-to-run variability (timing, buffer state,
 graph traversal) rather than population sampling. Per-pass metrics are stored
 in `experiment_repetitions`; they are not inferred from the aggregate row.
 
+## Balanced benchmark rounds
+
+A fixed exact-first / ascending-`ef_search` order gives each configuration a
+different cache and scheduler environment, so execution order is a confound.
+`benchmark_order.balanced_rounds(keys, rounds, seed)` builds a seeded base
+permutation and rotates it by `floor(n / rounds)` positions per round. Each
+round is a permutation of all configurations; with three or more rounds every
+configuration appears both early and late. The runner persists the round,
+position, seed and the round's complete order on each experiment row.
+
+The index is not rebuilt between configurations or rounds: only `ef_search`
+changes. Speed-ups use the mean exact baseline across rounds rather than one
+adjacent run. All measurements are explicitly warm-cache; no cold-cache result
+is claimed.
+
+## Query selection
+
+`select_test_ids(dataset_id, limit, sampling, seed)` chooses the evaluated
+held-out ids. `first` reproduces the historical behaviour; `stratified`
+allocates slots proportionally by class with a largest-remainder rule and a
+one-slot minimum for present classes when the sample is large enough, then
+samples within each class with a seed derived from the global seed and class
+label. Ids are sorted, so exact and HNSW use the same queries in the same
+order. The ids, sampling mode, seed and both class distributions are persisted
+and exported. `--max-queries 0` evaluates the entire test pool.
+
+## Timing decomposition
+
+`run_experiment` measures non-overlapping phases with `time.perf_counter()`:
+total runtime, index preparation (with fresh build time as a subset), ground
+truth, retrieval (the sum of individually stored query latencies), metrics,
+persistence and an orchestration residual. A reused index contributes zero
+`index_build_s`; its historical duration stays in `index_reused_build_ms`.
+The retired `api_overhead_s` was `runtime − query_time`, which incorrectly
+labelled ground-truth computation and orchestration as API overhead. HTTP
+latency must be measured separately at the request boundary.
+
 ## Index reuse
 
 Building an HNSW index over 50,000 rows took 3.24 s on the evaluation machine.
@@ -124,11 +161,15 @@ stratified_split  ──────────────► train_df        
                     ┌──────────────┴───────────────┐
                     ▼                              ▼
            exact (function form)          HNSW (operator form)
-           ground truth + baseline       recall, latency, accuracy
+           ground truth ids +             N repetitions ×
+           boundary candidates             every query
                     │                              │
                     └──────────────┬───────────────┘
                                    ▼
-                        majority vote → metrics → experiments
+         majority vote → metrics per repetition → experiments
+                   │
+                   ▼
+    experiment_repetitions + query_latencies → CSV artefacts
 ```
 
 ## Ground truth and ties
@@ -148,6 +189,24 @@ Tie-aware Recall@K counts any retrieved id inside the boundary candidate set
 as valid and divides by `k`. The tolerance and both metrics are persisted per
 experiment. On a pool with no boundary ties the two metrics coincide, which is
 a measurable outcome rather than an assumption.
+
+The same `(distance, id)` tiebreak is now used by the **general exact retrieval
+query**, not only by ground truth. The HNSW query deliberately keeps only the
+distance ordering: a secondary `id` sort would make the planner abandon the
+index scan and turn the approximation into an exhaustive scan. Tests build
+synthetic datasets with many identical distances and verify that exact ids are
+stable across repeated calls, that HNSW still uses the index, and that an
+equally distant but differently identified neighbour is not counted as a
+retrieval failure by the tie-aware metric.
+
+The `1e-6 / 1e-6` default was validated for L2, cosine and L1 with synthetic
+cases covering exact ties, sub-tolerance differences, clearly different
+distances, near-zero and large boundaries, and more than K tied candidates.
+The meaning is fixed as `distance ≤ boundary × (1 + relative) + absolute`; the
+tolerance is configurable per experiment and always persisted, so no metric
+definition is silently changed. Cosine distance is bounded and discrete for
+collinear float4 vectors, so one near-zero-boundary case is not constructible
+and is documented as a test skip.
 
 ## Measurement order
 
