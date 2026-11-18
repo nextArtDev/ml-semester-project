@@ -34,7 +34,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from app.core.database import connection, execute, fetch_all, fetch_one
 from app.core.environment import capture_environment
@@ -81,6 +81,12 @@ class ExperimentConfig:
     force_rebuild_index: bool = False
     tie_tolerance_relative: float = 1e-6
     tie_tolerance_absolute: float = 1e-6
+    query_sampling: str = "first"
+    query_sample_seed: int = 0
+    benchmark_round: int | None = None
+    benchmark_position: int | None = None
+    benchmark_seed: int | None = None
+    benchmark_order: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -102,10 +108,26 @@ class ExperimentConfig:
             raise ValueError("tie_tolerance_relative must be in [0, 1)")
         if self.tie_tolerance_absolute < 0.0:
             raise ValueError("tie_tolerance_absolute must be non-negative")
+        if self.query_sampling not in {"first", "stratified"}:
+            raise ValueError("query_sampling must be 'first' or 'stratified'")
+        if self.benchmark_round is not None and self.benchmark_round < 1:
+            raise ValueError("benchmark_round must be at least 1")
+        if self.benchmark_position is not None and self.benchmark_position < 1:
+            raise ValueError("benchmark_position must be at least 1")
 
 
 def _load_test_vectors(dataset_id: int, limit: int | None) -> list[tuple[int, int, str]]:
     return vs.load_test_vectors(dataset_id, limit)
+
+
+def _class_distribution(labels: dict[int, int] | Sequence[int]) -> dict[str, int]:
+    if isinstance(labels, dict):
+        counts = {int(label): int(count) for label, count in labels.items()}
+    else:
+        counts = {}
+        for label in labels:
+            counts[int(label)] = counts.get(int(label), 0) + 1
+    return {str(label): counts[label] for label in sorted(counts)}
 
 
 def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
@@ -133,17 +155,27 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     state = PreprocessState.from_dict(dataset["preprocessing"])
     class_labels = state.class_labels
 
-    rows = _load_test_vectors(config.dataset_id, config.max_queries)
+    selected_ids = vs.select_test_ids(
+        config.dataset_id,
+        config.max_queries,
+        sampling=config.query_sampling,
+        seed=config.query_sample_seed,
+    )
+    rows = vs.load_test_vectors_by_ids(config.dataset_id, selected_ids)
     if not rows:
         raise ValueError("Dataset has no test vectors to query")
 
+    query_ids = [r[0] for r in rows]
     query_vectors = [r[2] for r in rows]
     y_true = [r[1] for r in rows]
 
     train_size = vs.count_vectors(config.dataset_id, "train")
     total_test_pool = vs.count_vectors(config.dataset_id, "test")
+    pool_distribution = _class_distribution(vs.label_counts(config.dataset_id, "test"))
+    evaluated_distribution = _class_distribution(y_true)
 
     # --- Index preparation ------------------------------------------------
+    preparation_started = time.perf_counter()
     index_build_ms: float | None = None
     index_created_ms: float | None = None
     index_reused: bool | None = None
@@ -185,8 +217,10 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         if existing is not None:
             index_m = int(existing["m"])
             index_ef_construction = int(existing["ef_construction"])
+    index_preparation_s = time.perf_counter() - preparation_started
 
     # --- Ground truth (always exhaustive, tie-tolerant) --------------------
+    ground_truth_started = time.perf_counter()
     tolerance = TieTolerance(
         relative=config.tie_tolerance_relative,
         absolute=config.tie_tolerance_absolute,
@@ -202,6 +236,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     gt_candidates = [g.candidate_ids for g in ground_truth]
     tied_queries = sum(1 for g in ground_truth if g.is_tied)
     max_tied_candidates = max((len(g.candidate_ids) for g in ground_truth), default=0)
+    ground_truth_computation_s = time.perf_counter() - ground_truth_started
 
     # --- Retrieval under test ---------------------------------------------
     batch = vs.retrieve_batch(
@@ -215,6 +250,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     )
 
     # --- Metrics per repetition -------------------------------------------
+    metrics_started = time.perf_counter()
     per_repetition: list[dict[str, Any]] = []
     last_metrics: ClassificationMetrics | None = None
 
@@ -255,9 +291,17 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     if last_metrics is None:  # pragma: no cover - guarded by repetitions >= 1
         raise RuntimeError("No repetition was executed")
 
+    metrics_computation_s = time.perf_counter() - metrics_started
+
     # Latency percentiles come from every measured observation, not from a
-    # per-repetition average.
+    # per-repetition average.  The wall-clock time around the retrieval loop
+    # is *not* used here: the sum of individually timed queries avoids
+    # counting connection setup and result-conversion work twice.
     lat = latency_stats(batch.latencies)
+    retrieval_total_s = sum(batch.latencies) / 1000.0
+    retrieval_mean_per_query_ms = (
+        sum(batch.latencies) / len(batch.latencies) if batch.latencies else 0.0
+    )
 
     summary_keys = (
         "accuracy",
@@ -276,9 +320,8 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     used_seq_scan = batch.used_sequential_scan
     applied_ef = batch.applied_ef_search
 
-    total_runtime = time.perf_counter() - started
-    measured_query_time_s = sum(batch.latencies) / 1000.0
     fingerprint = dataset_fingerprint(config.dataset_id)
+    index_build_s = (index_build_ms / 1000.0) if index_build_ms is not None else 0.0
 
     payload = {
         "dataset_id": config.dataset_id,
@@ -315,14 +358,33 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         "seed": config.seed,
         "tie_tolerance_rel": tolerance.relative,
         "tie_tolerance_abs": tolerance.absolute,
+        "query_sampling": config.query_sampling,
+        "query_sample_seed": config.query_sample_seed,
+        "evaluated_query_ids": json.dumps(query_ids),
+        "test_pool_class_distribution": json.dumps(pool_distribution),
+        "evaluated_class_distribution": json.dumps(evaluated_distribution),
+        "benchmark_round": config.benchmark_round,
+        "benchmark_position": config.benchmark_position,
+        "benchmark_seed": config.benchmark_seed,
+        "benchmark_order": config.benchmark_order,
+        "warm_cache": True,
         "latency_avg_ms": lat["avg"],
         "latency_p50_ms": lat["p50"],
         "latency_p95_ms": lat["p95"],
         "latency_p99_ms": lat["p99"],
         "latency_min_ms": lat["min"],
         "latency_max_ms": lat["max"],
-        "total_runtime_s": total_runtime,
-        "api_overhead_s": max(0.0, total_runtime - measured_query_time_s),
+        # Timing fields are filled in after persistence finishes (see below).
+        "total_experiment_runtime_s": 0.0,
+        "index_preparation_s": index_preparation_s,
+        "index_build_s": index_build_s,
+        "ground_truth_computation_s": ground_truth_computation_s,
+        "retrieval_total_s": retrieval_total_s,
+        "retrieval_mean_per_query_ms": retrieval_mean_per_query_ms,
+        "metrics_computation_s": metrics_computation_s,
+        "persistence_s": 0.0,
+        "orchestration_overhead_s": 0.0,
+        "total_runtime_s": 0.0,  # legacy alias, kept for older clients
         "used_index_scan": used_index,
         "environment": json.dumps(
             {
@@ -341,6 +403,13 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
                 "repetition_query_order": "identical order across repetitions",
                 "plan_verified": bool(batch.plan),
                 "index_reused": index_reused,
+                "query_sampling": config.query_sampling,
+                "query_sample_seed": config.query_sample_seed,
+                "query_count": len(query_ids),
+                "benchmark_round": config.benchmark_round,
+                "benchmark_position": config.benchmark_position,
+                "benchmark_seed": config.benchmark_seed,
+                "benchmark_cache": "warm buffer cache; no cold-cache procedure was executed",
             }
         ),
         "confusion_matrix": json.dumps(last_metrics.confusion_matrix),
@@ -356,9 +425,40 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         "status": "completed",
     }
 
+    persistence_started = time.perf_counter()
     experiment_id = _insert_experiment(payload)
     _insert_repetitions(experiment_id, per_repetition)
     _insert_latencies(experiment_id, batch)
+    persistence_s = time.perf_counter() - persistence_started
+
+    total_experiment_runtime_s = time.perf_counter() - started
+    overlapping_phases = (
+        index_preparation_s
+        + ground_truth_computation_s
+        + retrieval_total_s
+        + metrics_computation_s
+        + persistence_s
+    )
+    orchestration_overhead_s = max(0.0, total_experiment_runtime_s - overlapping_phases)
+
+    timing_columns = {
+        "total_experiment_runtime_s": total_experiment_runtime_s,
+        "index_preparation_s": index_preparation_s,
+        "index_build_s": index_build_s,
+        "ground_truth_computation_s": ground_truth_computation_s,
+        "retrieval_total_s": retrieval_total_s,
+        "retrieval_mean_per_query_ms": retrieval_mean_per_query_ms,
+        "metrics_computation_s": metrics_computation_s,
+        "persistence_s": persistence_s,
+        "orchestration_overhead_s": orchestration_overhead_s,
+        "total_runtime_s": total_experiment_runtime_s,
+    }
+    assignments = ", ".join(f"{column} = %s" for column in timing_columns)
+    execute(
+        f"UPDATE experiments SET {assignments} WHERE id = %s",
+        (*timing_columns.values(), experiment_id),
+    )
+    payload.update(timing_columns)
 
     logger.info(
         "Experiment %s done: method=%s k=%s ef=%s unique_queries=%s reps=%s "
@@ -532,7 +632,16 @@ def get_repetitions(experiment_id: int) -> list[dict[str, Any]]:
 
 def _serialize_experiment(row: dict) -> dict[str, Any]:
     out = dict(row)
-    for key in ("confusion_matrix", "per_class_metrics", "config", "environment"):
+    for key in (
+        "confusion_matrix",
+        "per_class_metrics",
+        "config",
+        "environment",
+        "evaluated_query_ids",
+        "test_pool_class_distribution",
+        "evaluated_class_distribution",
+        "benchmark_order",
+    ):
         raw = out.get(key)
         if isinstance(raw, str):
             try:

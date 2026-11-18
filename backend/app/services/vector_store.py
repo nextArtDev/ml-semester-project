@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass
 from typing import Sequence
@@ -128,18 +129,151 @@ def count_vectors(dataset_id: int, which: str = "train") -> int:
             return int(row["c"]) if row else 0
 
 
-def load_test_vectors(dataset_id: int, limit: int | None) -> list[tuple[int, int, str]]:
-    """Return ``(id, label, embedding_text)`` triples for the query pool."""
+def _largest_remainder(n: int, counts: dict[int, int]) -> dict[int, int]:
+    """Allocate ``n`` slots proportionally to ``counts`` without losing slots.
+
+    Floors are taken first; the remaining slots go to the classes with the
+    largest fractional remainder, with ascending label as a deterministic
+    tiebreak.  The result always sums to ``n`` (for 0 <= n <= total).
+    """
+    total = sum(counts.values())
+    if total == 0 or n <= 0:
+        return {label: 0 for label in counts}
+    if n >= total:
+        return dict(counts)
+
+    floors = {label: (n * count) // total for label, count in counts.items()}
+    nonzero = [label for label, count in counts.items() if count > 0]
+
+    # A rare class would otherwise receive zero slots under pure proportional
+    # allocation.  When there is room, every present class gets at least one
+    # slot; the slots are then balanced back to exactly n.
+    if n >= len(nonzero):
+        for label in nonzero:
+            floors[label] = max(1, floors[label])
+        while sum(floors.values()) > n:
+            donor = max(nonzero, key=lambda label: (floors[label], -label))
+            if floors[donor] <= 1:
+                break
+            floors[donor] -= 1
+        while sum(floors.values()) < n:
+            recipient = max(
+                nonzero,
+                key=lambda label: (counts[label] - floors[label], -label),
+            )
+            if floors[recipient] >= counts[recipient]:
+                break
+            floors[recipient] += 1
+    else:
+        remainder = n - sum(floors.values())
+        ranked = sorted(
+            counts,
+            key=lambda label: (-((n * counts[label]) % total), label),
+        )
+        for label in ranked[:remainder]:
+            floors[label] += 1
+    return floors
+
+
+def select_test_ids(
+    dataset_id: int,
+    limit: int | None,
+    sampling: str = "first",
+    seed: int = 0,
+) -> list[int]:
+    """Choose the evaluated query ids from the held-out pool.
+
+    ``first`` keeps the historical behaviour (the first ``limit`` ids by id).
+    ``stratified`` allocates the sample proportionally to each class with the
+    largest-remainder method and samples within each class with a seed derived
+    from ``seed`` and the class label.  The returned ids are always sorted, so
+    exact and HNSW see the same queries in the same order.
+    """
+    if sampling not in {"first", "stratified"}:
+        raise ValueError(f"unknown query sampling mode: {sampling!r}")
     table = test_table(dataset_id)
-    limit_clause = sql.SQL(" LIMIT {n}").format(n=sql.Literal(limit)) if limit else sql.SQL("")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT id, label FROM {t} ORDER BY id").format(
+                    t=sql.Identifier(table)
+                )
+            )
+            rows = [(int(r["id"]), int(r["label"])) for r in cur.fetchall()]
+
+    if limit is None or limit >= len(rows):
+        return [row_id for row_id, _ in rows]
+    if limit <= 0:
+        raise ValueError("limit must be positive or None")
+
+    if sampling == "first":
+        return [row_id for row_id, _ in rows[:limit]]
+
+    by_label: dict[int, list[int]] = {}
+    for row_id, label in rows:
+        by_label.setdefault(label, []).append(row_id)
+    allocation = _largest_remainder(limit, {k: len(v) for k, v in by_label.items()})
+
+    chosen: list[int] = []
+    for label in sorted(by_label):
+        ids = by_label[label]
+        need = allocation[label]
+        if need >= len(ids):
+            chosen.extend(ids)
+        elif need > 0:
+            chosen.extend(sorted(random.Random(f"{seed}:{label}").sample(ids, need)))
+    return sorted(chosen)
+
+
+def label_counts(dataset_id: int, which: str = "test") -> dict[int, int]:
+    """Class counts of a dataset's train or test pool."""
+    table = train_table(dataset_id) if which == "train" else test_table(dataset_id)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT label, count(*) AS c FROM {t} GROUP BY label ORDER BY label").format(
+                    t=sql.Identifier(table)
+                )
+            )
+            return {int(r["label"]): int(r["c"]) for r in cur.fetchall()}
+
+
+def load_test_vectors_by_ids(
+    dataset_id: int, ids: Sequence[int]
+) -> list[tuple[int, int, str]]:
+    """Fetch ``(id, label, embedding_text)`` for an explicit, ordered id set."""
+    if not ids:
+        return []
+    table = test_table(dataset_id)
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 sql.SQL(
-                    "SELECT id, label, embedding::text AS embedding FROM {t} ORDER BY id{l}"
-                ).format(t=sql.Identifier(table), l=limit_clause)
+                    "SELECT id, label, embedding::text AS embedding FROM {t} "
+                    "WHERE id = ANY(%s) ORDER BY id"
+                ).format(t=sql.Identifier(table)),
+                (list(ids),),
             )
-            return [(int(r["id"]), int(r["label"]), r["embedding"]) for r in cur.fetchall()]
+            return [
+                (int(r["id"]), int(r["label"]), r["embedding"]) for r in cur.fetchall()
+            ]
+
+
+def load_test_vectors(
+    dataset_id: int,
+    limit: int | None = None,
+    sampling: str = "first",
+    seed: int = 0,
+) -> list[tuple[int, int, str]]:
+    """Return ``(id, label, embedding_text)`` triples for the query pool.
+
+    Kept as the convenient wrapper used by the dataset-statistics script;
+    experiments call ``select_test_ids`` and ``load_test_vectors_by_ids``
+    directly so that the exact ids can be persisted.
+    """
+    return load_test_vectors_by_ids(
+        dataset_id, select_test_ids(dataset_id, limit, sampling, seed)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -399,29 +533,55 @@ def _distance_expr(metric: DistanceMetric, use_operator: bool) -> sql.Composable
     return sql.SQL("{} (embedding, %s::vector)").format(sql.SQL(metric.function))
 
 
+def _order_expr(dist: sql.Composable, use_operator: bool) -> sql.Composable:
+    """Ordering for a nearest-neighbour query.
+
+    The exhaustive path gets an ``id`` tiebreak so that a repeated exact query
+    returns the same identifiers even when several rows share a distance.  The
+    HNSW path keeps only the index-compatible distance ordering: adding a
+    secondary sort key makes the planner abandon the index scan, which would
+    turn an approximate measurement into a sequential scan.
+    """
+    if use_operator:
+        return dist
+    return sql.SQL("{dist}, id").format(dist=dist)
+
+
 def _query_sql(
     dataset_id: int, metric: DistanceMetric, k: int, use_operator: bool
 ) -> sql.Composed:
     dist = _distance_expr(metric, use_operator)
+    order = _order_expr(dist, use_operator)
     return sql.SQL(
         "SELECT id, label, {dist} AS distance "
         "FROM {t} "
-        "ORDER BY {dist} "
+        "ORDER BY {order} "
         "LIMIT {k}"
-    ).format(dist=dist, t=sql.Identifier(train_table(dataset_id)), k=sql.Literal(k))
+    ).format(
+        dist=dist,
+        order=order,
+        t=sql.Identifier(train_table(dataset_id)),
+        k=sql.Literal(k),
+    )
 
 
 def _explain_sql(
     dataset_id: int, metric: DistanceMetric, k: int, use_operator: bool
 ) -> sql.Composed:
     dist = _distance_expr(metric, use_operator)
+    order = _order_expr(dist, use_operator)
     return sql.SQL(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) "
         "SELECT id, label, {dist} AS distance "
         "FROM {t} "
-        "ORDER BY {dist} "
+        "ORDER BY {order} "
         "LIMIT {k}"
-    ).format(dist=dist, t=sql.Identifier(train_table(dataset_id)), k=sql.Literal(k))
+    ).format(
+        dist=dist,
+        order=order,
+        t=sql.Identifier(train_table(dataset_id)),
+        k=sql.Literal(k),
+    )
 
 
 def retrieve(

@@ -41,6 +41,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.database import execute, fetch_one  # noqa: E402
 from app.services import vector_store as vs  # noqa: E402
+from app.services.benchmark_order import balanced_rounds  # noqa: E402
 from app.services.classification import repetition_summary  # noqa: E402
 from app.services.experiments import (  # noqa: E402
     ExperimentConfig,
@@ -95,8 +96,21 @@ FIELDS = [
     "used_index_scan",
     "used_sequential_scan",
     "applied_ef_search",
-    "api_overhead_s",
-    "total_runtime_s",
+    "query_sampling",
+    "query_sample_seed",
+    "benchmark_round",
+    "benchmark_position",
+    "benchmark_seed",
+    "warm_cache",
+    "total_experiment_runtime_s",
+    "index_preparation_s",
+    "index_build_s",
+    "ground_truth_computation_s",
+    "retrieval_total_s",
+    "retrieval_mean_per_query_ms",
+    "metrics_computation_s",
+    "persistence_s",
+    "orchestration_overhead_s",
     "env_python",
     "env_os",
     "env_machine",
@@ -171,7 +185,37 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--metric", choices=["l2", "cosine", "l1"], default="l2")
-    parser.add_argument("--max-queries", type=int, default=1000)
+    parser.add_argument(
+        "--max-queries",
+        type=int,
+        default=1000,
+        help="Queries to evaluate; 0 or omitted upper bound means all test rows.",
+    )
+    parser.add_argument(
+        "--query-sampling",
+        choices=["first", "stratified"],
+        default="stratified",
+        help="Select the first ids or a seeded class-stratified sample.",
+    )
+    parser.add_argument(
+        "--query-sample-seed",
+        type=int,
+        default=0,
+        help="Seed for stratified query selection.",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=3,
+        help="Number of paired benchmark rounds; each round runs every configuration once. "
+        "Three or more guarantee every configuration is both early and late.",
+    )
+    parser.add_argument(
+        "--order-seed",
+        type=int,
+        default=0,
+        help="Seed for the balanced per-round execution order.",
+    )
     parser.add_argument(
         "--repetitions",
         type=int,
@@ -199,6 +243,11 @@ def parse_args() -> argparse.Namespace:
         "--repetition-summary",
         default="",
         help="Cross-repetition aggregate CSV output path (median/dispersion per metric).",
+    )
+    parser.add_argument(
+        "--query-samples",
+        default="",
+        help="JSON output path mapping each experiment to its evaluated query ids.",
     )
     return parser.parse_args()
 
@@ -308,12 +357,24 @@ def _drop_index(dataset_id: int) -> None:
 # ---------------------------------------------------------------------------
 # Running
 # ---------------------------------------------------------------------------
+def _config_key(method: str, ef_search: int | None) -> str:
+    return f"{method}:{ef_search if ef_search is not None else '-'}"
+
+
+def _parse_key(key: str) -> tuple[str, int | None]:
+    method, raw_ef = key.split(":", 1)
+    return method, None if raw_ef == "-" else int(raw_ef)
+
+
 def run_one(
     args: argparse.Namespace,
     metric: DistanceMetric,
     method: str,
     ef_search: int | None,
     size_label: str,
+    benchmark_round: int,
+    benchmark_position: int,
+    benchmark_order: str,
 ) -> dict:
     config = ExperimentConfig(
         dataset_id=args.dataset_id,
@@ -323,10 +384,19 @@ def run_one(
         ef_search=ef_search,
         hnsw_m=args.hnsw_m,
         hnsw_ef_construction=args.hnsw_ef_construction,
-        max_queries=args.max_queries,
+        max_queries=args.max_queries if args.max_queries > 0 else None,
         repetitions=args.repetitions,
         seed=args.seed,
-        name=f"{method} k={args.k} ef={ef_search} size={size_label}",
+        query_sampling=args.query_sampling,
+        query_sample_seed=args.query_sample_seed,
+        benchmark_round=benchmark_round,
+        benchmark_position=benchmark_position,
+        benchmark_seed=args.order_seed,
+        benchmark_order=benchmark_order,
+        name=(
+            f"{method} k={args.k} ef={ef_search} size={size_label} "
+            f"round={benchmark_round} pos={benchmark_position}"
+        ),
     )
     return run_experiment(config)
 
@@ -365,11 +435,22 @@ def main() -> int:
     if args.repetitions < 1:
         print("--repetitions must be at least 1", file=sys.stderr)
         return 2
+    if args.rounds < 1:
+        print("--rounds must be at least 1", file=sys.stderr)
+        return 2
 
     dataset = fetch_one("SELECT * FROM datasets WHERE id = %s", (args.dataset_id,))
     if dataset is None:
         print(f"Dataset {args.dataset_id} not found", file=sys.stderr)
         return 1
+
+    metric = DistanceMetric(args.metric)
+    sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
+    ef_values = [int(e) for e in args.ef_search.split(",") if e.strip()]
+    configs = [_config_key("exact", None)] + [
+        _config_key("hnsw", ef) for ef in ef_values
+    ]
+    rounds = balanced_rounds(configs, args.rounds, args.order_seed)
 
     print(
         f"dataset {args.dataset_id}: {dataset['name']} "
@@ -380,10 +461,11 @@ def main() -> int:
         f"k={args.k} metric={args.metric} queries={args.max_queries} "
         f"repetitions={args.repetitions} seed={args.seed}"
     )
-
-    metric = DistanceMetric(args.metric)
-    sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
-    ef_values = [int(e) for e in args.ef_search.split(",") if e.strip()]
+    print(
+        f"rounds={args.rounds} order_seed={args.order_seed} "
+        f"query_sampling={args.query_sampling} query_sample_seed={args.query_sample_seed}"
+    )
+    print("warm buffer cache; no cold-cache procedure was executed")
 
     # The dataset is mutated in place when a size sweep is requested, so the
     # original full-size training pool is snapshotted first and restored at
@@ -392,7 +474,7 @@ def main() -> int:
 
     rows: list[dict] = []
     experiment_ids: list[int] = []
-    baseline_by_size: dict[int | None, dict] = {}
+    query_samples: dict[str, dict] = {}
 
     try:
         for size in sizes or [None]:
@@ -402,31 +484,48 @@ def main() -> int:
                 restore_pool(args.dataset_id, original_rows)
                 subset_dataset(args.dataset_id, size, args.seed)
 
-            print(f"[size {label}] exact baseline")
-            exact_result = run_one(args, metric, "exact", None, label)
-            exact = flatten(exact_result)
-            experiment_ids.append(int(exact_result["id"]))
-            rows.append(exact)
-            baseline_by_size[size] = exact
+            # The index is built on the first HNSW run of this size and reused
+            # for every later configuration and round. It is not rebuilt
+            # between ef_search values: only ef_search changes.
+            for round_index, order in enumerate(rounds, start=1):
+                print(f"[size {label}] round {round_index}: {' -> '.join(order)}")
+                order_json = json.dumps(order)
+                for position, key in enumerate(order, start=1):
+                    method, ef = _parse_key(key)
+                    print(f"[size {label}] round {round_index} pos {position}: {method} ef={ef}")
+                    result = run_one(
+                        args,
+                        metric,
+                        method,
+                        ef,
+                        label,
+                        round_index,
+                        position,
+                        order_json,
+                    )
+                    experiment_id = int(result["id"])
+                    flat = flatten(result)
+                    experiment_ids.append(experiment_id)
+                    rows.append(flat)
+                    if method == "hnsw":
+                        print_warning_if_index_unused(flat)
 
-            for ef in ef_values:
-                print(f"[size {label}] HNSW ef_search={ef}")
-                approx_result = run_one(args, metric, "hnsw", ef, label)
-                approx = flatten(approx_result)
-                experiment_ids.append(int(approx_result["id"]))
-                approx["speedup_p50"] = _ratio(
-                    exact["latency_p50_ms"], approx["latency_p50_ms"]
-                )
-                approx["speedup_avg"] = _ratio(
-                    exact["latency_avg_ms"], approx["latency_avg_ms"]
-                )
-                rows.append(approx)
-                print_warning_if_index_unused(approx)
+                    detail = get_experiment(experiment_id) or {}
+                    query_samples[str(experiment_id)] = {
+                        "dataset_id": args.dataset_id,
+                        "train_size": flat["train_size"],
+                        "benchmark_round": flat["benchmark_round"],
+                        "benchmark_position": flat["benchmark_position"],
+                        "query_sampling": flat["query_sampling"],
+                        "query_sample_seed": flat["query_sample_seed"],
+                        "query_ids": detail.get("evaluated_query_ids"),
+                    }
     finally:
         if sizes and original_rows:
             print("restoring original training pool")
             restore_pool(args.dataset_id, original_rows)
 
+    _add_speedups(rows)
     _print_table(rows)
 
     if args.output:
@@ -443,8 +542,46 @@ def main() -> int:
     if args.repetition_summary:
         _write_repetition_summary(experiment_ids, args.repetition_summary)
         print(f"Repetition summary CSV written to {args.repetition_summary}")
+    if args.query_samples:
+        Path(args.query_samples).write_text(
+            json.dumps(query_samples, indent=2), encoding="utf-8"
+        )
+        print(f"Query ids written to {args.query_samples}")
 
     return 0
+
+
+def _add_speedups(rows: list[dict]) -> None:
+    """Attach speed-ups from the mean exact baseline of the same pool size.
+
+    The baseline is averaged over all benchmark rounds instead of taken from a
+    single run, so a configuration's speed-up does not depend on whether an
+    exact run happened to be scheduled immediately before it.
+    """
+    baselines: dict[object, dict[str, float]] = {}
+    for row in rows:
+        if row["retrieval_method"] != "exact":
+            continue
+        size = row["train_size"]
+        bucket = baselines.setdefault(size, {"p50": [], "avg": []})
+        for key, source in (("p50", "latency_p50_ms"), ("avg", "latency_avg_ms")):
+            value = row.get(source)
+            if value not in (None, ""):
+                bucket[key].append(float(value))
+
+    for row in rows:
+        if row["retrieval_method"] != "hnsw":
+            continue
+        bucket = baselines.get(row["train_size"])
+        if not bucket:
+            continue
+        for key, source, target in (
+            ("p50", "latency_p50_ms", "speedup_p50"),
+            ("avg", "latency_avg_ms", "speedup_avg"),
+        ):
+            values = bucket[key]
+            baseline = sum(values) / len(values) if values else None
+            row[target] = _ratio(baseline, row.get(source))
 
 
 def _ratio(baseline: float | None, measured: float | None) -> float | None:

@@ -41,6 +41,11 @@ def run(request: ExperimentRequest) -> dict:
         hnsw_ef_construction=request.hnsw_ef_construction,
         max_queries=request.max_queries,
         repetitions=request.repetitions,
+        seed=request.seed,
+        query_sampling=request.query_sampling,
+        query_sample_seed=request.query_sample_seed,
+        tie_tolerance_relative=request.tie_tolerance_relative,
+        tie_tolerance_absolute=request.tie_tolerance_absolute,
         name=request.name,
         weighted_voting=request.weighted_voting,
     )

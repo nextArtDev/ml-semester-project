@@ -70,6 +70,11 @@ class ExperimentRequest(BaseModel):
     hnsw_ef_construction: int = Field(64, ge=4, le=1000)
     max_queries: int | None = Field(2_000, ge=1, le=50_000)
     repetitions: int = Field(1, ge=1, le=100)
+    seed: int = 0
+    query_sampling: Literal["first", "stratified"] = "first"
+    query_sample_seed: int = 0
+    tie_tolerance_relative: float = Field(1e-6, ge=0, lt=1)
+    tie_tolerance_absolute: float = Field(1e-6, ge=0)
     name: str | None = None
     weighted_voting: bool = False
 

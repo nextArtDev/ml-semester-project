@@ -80,6 +80,25 @@ export interface Experiment {
   latency_max_ms: number | null
   total_runtime_s: number | null
   api_overhead_s: number | null
+  total_experiment_runtime_s: number | null
+  index_preparation_s: number | null
+  index_build_s: number | null
+  ground_truth_computation_s: number | null
+  retrieval_total_s: number | null
+  retrieval_mean_per_query_ms: number | null
+  metrics_computation_s: number | null
+  persistence_s: number | null
+  orchestration_overhead_s: number | null
+  query_sampling: 'first' | 'stratified'
+  query_sample_seed: number
+  evaluated_query_ids: number[]
+  test_pool_class_distribution: Record<string, number>
+  evaluated_class_distribution: Record<string, number>
+  benchmark_round: number | null
+  benchmark_position: number | null
+  benchmark_seed: number | null
+  benchmark_order: string | null
+  warm_cache: boolean | null
   used_index_scan: boolean | null
   environment: Record<string, unknown>
   confusion_matrix: number[][]
