@@ -129,6 +129,18 @@ def count_vectors(dataset_id: int, which: str = "train") -> int:
             return int(row["c"]) if row else 0
 
 
+def largest_remainder_allocation(counts: dict[int, int], slots: int) -> dict[int, int]:
+    """Allocate ``slots`` proportionally to class counts.
+
+    Used for both query sampling and training-pool subsampling.  Integer quotas
+    are taken first, remaining slots go to the largest fractional remainders,
+    and every present class receives at least one slot when the requested
+    count permits.  The returned allocations always sum to ``slots`` when
+    ``0 <= slots <= sum(counts.values())``.
+    """
+    return _largest_remainder(slots, counts)
+
+
 def _largest_remainder(n: int, counts: dict[int, int]) -> dict[int, int]:
     """Allocate ``n`` slots proportionally to ``counts`` without losing slots.
 

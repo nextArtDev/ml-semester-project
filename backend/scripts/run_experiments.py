@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -52,6 +53,7 @@ from app.services.experiments import (  # noqa: E402
 from app.services.metrics import DistanceMetric  # noqa: E402
 
 FIELDS = [
+    "experiment_id",
     "dataset_id",
     "train_size",
     "test_size",
@@ -101,12 +103,17 @@ FIELDS = [
     "benchmark_round",
     "benchmark_position",
     "benchmark_seed",
+    "run_id",
     "warm_cache",
     "total_experiment_runtime_s",
     "index_preparation_s",
     "index_build_s",
     "ground_truth_computation_s",
+    "ground_truth_cache_hit",
+    "ground_truth_lookup_s",
     "retrieval_total_s",
+    "summed_query_execution_time_s",
+    "retrieval_batch_wall_time_s",
     "retrieval_mean_per_query_ms",
     "metrics_computation_s",
     "persistence_s",
@@ -249,6 +256,16 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="JSON output path mapping each experiment to its evaluated query ids.",
     )
+    parser.add_argument(
+        "--benchmark-orders",
+        default="",
+        help="JSON output path with the complete order and seed of every round.",
+    )
+    parser.add_argument(
+        "--run-id",
+        default="",
+        help="Label persisted on every experiment so artifacts can be tied to this run.",
+    )
     return parser.parse_args()
 
 
@@ -293,13 +310,18 @@ def restore_pool(dataset_id: int, rows: list[tuple]) -> None:
 
 
 def subset_dataset(dataset_id: int, max_train_rows: int | None, seed: int) -> int | None:
-    """Reduce the training pool to ``max_train_rows`` rows, stratified by label.
+    """Reduce the training pool to exactly ``max_train_rows`` rows.
 
-    Rows are removed from the database (not merely ignored) so that the
-    measured latency reflects the real table size. Sampling is proportional
-    within each class, with a session-level ``setseed`` for reproducibility.
+    Rows are removed physically so the measured latency reflects the real table
+    size.  Class quotas use a largest-remainder allocation, so the resulting
+    count equals the requested target whenever the pool is large enough and
+    every class is represented when the target permits it.  Within each class
+    the kept ids are chosen by ``random.Random(f"{seed}:{label}")``, which is
+    deterministic for any integer seed and avoids PostgreSQL's ``setseed``
+    range restriction entirely.
 
-    Returns the resulting row count, or ``None`` when no reduction happened.
+    Returns the actual resulting row count, or ``None`` when no reduction was
+    requested.
     """
     if max_train_rows is None:
         return None
@@ -308,33 +330,36 @@ def subset_dataset(dataset_id: int, max_train_rows: int | None, seed: int) -> in
     with vs.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                vs.sql.SQL("SELECT count(*) AS c FROM {t}").format(
+                vs.sql.SQL("SELECT id, label FROM {t} ORDER BY id").format(
                     t=vs.sql.Identifier(table)
                 )
             )
-            total = int(cur.fetchone()["c"])
+            rows = [(int(r["id"]), int(r["label"])) for r in cur.fetchall()]
+            total = len(rows)
             if total <= max_train_rows:
                 return total
 
-            fraction = max_train_rows / total
-            # setseed must run in the same session as the random() call.
-            cur.execute("SELECT setseed(%s)", (seed / 10000.0,))
+            by_label: dict[int, list[int]] = {}
+            for row_id, label in rows:
+                by_label.setdefault(label, []).append(row_id)
+            counts = {label: len(ids) for label, ids in by_label.items()}
+            allocation = vs.largest_remainder_allocation(counts, max_train_rows)
+
+            keep: list[int] = []
+            for label in sorted(by_label):
+                ids = by_label[label]
+                need = allocation[label]
+                if need >= len(ids):
+                    keep.extend(ids)
+                elif need > 0:
+                    keep.extend(sorted(random.Random(f"{seed}:{label}").sample(ids, need)))
+            keep.sort()
+
             cur.execute(
-                vs.sql.SQL(
-                    "WITH ranked AS ("
-                    "  SELECT id,"
-                    "         row_number() OVER ("
-                    "           PARTITION BY label ORDER BY random()"
-                    "         ) AS rn,"
-                    "         count(*) OVER (PARTITION BY label) AS cnt"
-                    "  FROM {t}"
-                    "), keep AS ("
-                    "  SELECT id FROM ranked"
-                    "  WHERE rn <= GREATEST(1, floor(cnt * %s))"
-                    ")"
-                    "DELETE FROM {t} WHERE id NOT IN (SELECT id FROM keep)"
-                ).format(t=vs.sql.Identifier(table)),
-                (fraction,),
+                vs.sql.SQL("DELETE FROM {t} WHERE NOT (id = ANY(%s))").format(
+                    t=vs.sql.Identifier(table)
+                ),
+                (keep,),
             )
             cur.execute(
                 vs.sql.SQL("SELECT count(*) AS c FROM {t}").format(
@@ -393,6 +418,7 @@ def run_one(
         benchmark_position=benchmark_position,
         benchmark_seed=args.order_seed,
         benchmark_order=benchmark_order,
+        run_id=args.run_id or None,
         name=(
             f"{method} k={args.k} ef={ef_search} size={size_label} "
             f"round={benchmark_round} pos={benchmark_position}"
@@ -409,6 +435,7 @@ def flatten(result: dict) -> dict:
         environment = json.loads(environment)
 
     row = {field: result.get(field) for field in FIELDS}
+    row["experiment_id"] = int(result["id"])
     row["measured_queries"] = environment.get("measured_queries")
     row["preprocessing_mode"] = environment.get("preprocessing_mode")
     row["used_sequential_scan"] = environment.get("used_sequential_scan")
@@ -475,14 +502,17 @@ def main() -> int:
     rows: list[dict] = []
     experiment_ids: list[int] = []
     query_samples: dict[str, dict] = {}
+    benchmark_orders: dict[str, dict] = {}
 
     try:
         for size in sizes or [None]:
             label = "full" if size is None else str(size)
+            actual_size: int | None = None
             if size is not None:
                 print(f"[size {size}] rebuilding training pool")
                 restore_pool(args.dataset_id, original_rows)
-                subset_dataset(args.dataset_id, size, args.seed)
+                actual_size = subset_dataset(args.dataset_id, size, args.seed)
+                print(f"[size {label}] actual training-pool size: {actual_size}")
 
             # The index is built on the first HNSW run of this size and reused
             # for every later configuration and round. It is not rebuilt
@@ -490,6 +520,19 @@ def main() -> int:
             for round_index, order in enumerate(rounds, start=1):
                 print(f"[size {label}] round {round_index}: {' -> '.join(order)}")
                 order_json = json.dumps(order)
+                round_key = f"{label}:{round_index}"
+                benchmark_orders[round_key] = {
+                    "dataset_id": args.dataset_id,
+                    "train_size_target": size,
+                    "train_size_actual": actual_size,
+                    "benchmark_round": round_index,
+                    "order_seed": args.order_seed,
+                    "training_pool_seed": args.seed,
+                    "query_sample_seed": args.query_sample_seed,
+                    "run_id": args.run_id or None,
+                    "order": list(order),
+                    "experiment_ids": [],
+                }
                 for position, key in enumerate(order, start=1):
                     method, ef = _parse_key(key)
                     print(f"[size {label}] round {round_index} pos {position}: {method} ef={ef}")
@@ -504,6 +547,7 @@ def main() -> int:
                         order_json,
                     )
                     experiment_id = int(result["id"])
+                    benchmark_orders[round_key]["experiment_ids"].append(experiment_id)
                     flat = flatten(result)
                     experiment_ids.append(experiment_id)
                     rows.append(flat)
@@ -547,6 +591,11 @@ def main() -> int:
             json.dumps(query_samples, indent=2), encoding="utf-8"
         )
         print(f"Query ids written to {args.query_samples}")
+    if args.benchmark_orders:
+        Path(args.benchmark_orders).write_text(
+            json.dumps(benchmark_orders, indent=2), encoding="utf-8"
+        )
+        print(f"Benchmark orders written to {args.benchmark_orders}")
 
     return 0
 

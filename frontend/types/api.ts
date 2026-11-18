@@ -98,7 +98,12 @@ export interface Experiment {
   benchmark_position: number | null
   benchmark_seed: number | null
   benchmark_order: string | null
+  run_id: string | null
   warm_cache: boolean | null
+  ground_truth_cache_hit: boolean | null
+  ground_truth_lookup_s: number | null
+  summed_query_execution_time_s: number | null
+  retrieval_batch_wall_time_s: number | null
   used_index_scan: boolean | null
   environment: Record<string, unknown>
   confusion_matrix: number[][]

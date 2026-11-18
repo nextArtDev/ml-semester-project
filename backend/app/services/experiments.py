@@ -87,6 +87,8 @@ class ExperimentConfig:
     benchmark_position: int | None = None
     benchmark_seed: int | None = None
     benchmark_order: str | None = None
+    run_id: str | None = None
+    use_ground_truth_cache: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -128,6 +130,34 @@ def _class_distribution(labels: dict[int, int] | Sequence[int]) -> dict[str, int
         for label in labels:
             counts[int(label)] = counts.get(int(label), 0) + 1
     return {str(label): counts[label] for label in sorted(counts)}
+
+
+# Exact ground truth depends only on the pool fingerprint, query ids, k,
+# metric and tie tolerance.  A bounded in-process cache lets a sweep reuse it
+# across configurations and rounds without ever mixing different pools or
+# metrics.  It is computed before retrieval, so it cannot affect measured
+# query latency.
+_GROUND_TRUTH_CACHE: dict[tuple, list[Any]] = {}
+_GROUND_TRUTH_CACHE_LIMIT = 32
+
+
+def ground_truth_cache_key(
+    fingerprint: str,
+    query_ids: Sequence[int],
+    config: ExperimentConfig,
+) -> tuple:
+    return (
+        fingerprint,
+        tuple(query_ids),
+        config.k,
+        config.distance_metric.value,
+        config.tie_tolerance_relative,
+        config.tie_tolerance_absolute,
+    )
+
+
+def clear_ground_truth_cache() -> None:
+    _GROUND_TRUTH_CACHE.clear()
 
 
 def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
@@ -173,6 +203,9 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     total_test_pool = vs.count_vectors(config.dataset_id, "test")
     pool_distribution = _class_distribution(vs.label_counts(config.dataset_id, "test"))
     evaluated_distribution = _class_distribution(y_true)
+    # Computed once here so the cache key is based on the pool that is actually
+    # queried, and reused in the persisted payload at the end of the run.
+    fingerprint = dataset_fingerprint(config.dataset_id)
 
     # --- Index preparation ------------------------------------------------
     preparation_started = time.perf_counter()
@@ -220,25 +253,40 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     index_preparation_s = time.perf_counter() - preparation_started
 
     # --- Ground truth (always exhaustive, tie-tolerant) --------------------
-    ground_truth_started = time.perf_counter()
     tolerance = TieTolerance(
         relative=config.tie_tolerance_relative,
         absolute=config.tie_tolerance_absolute,
     )
-    ground_truth = vs.ground_truth_candidates(
-        query_vectors,
-        config.k,
-        config.distance_metric,
-        config.dataset_id,
-        tolerance,
-    )
+    cache_key = ground_truth_cache_key(fingerprint, query_ids, config)
+    lookup_started = time.perf_counter()
+    cache_hit = config.use_ground_truth_cache and cache_key in _GROUND_TRUTH_CACHE
+    ground_truth_lookup_s = time.perf_counter() - lookup_started
+
+    if cache_hit:
+        ground_truth = _GROUND_TRUTH_CACHE[cache_key]
+        ground_truth_computation_s = 0.0
+    else:
+        ground_truth_started = time.perf_counter()
+        ground_truth = vs.ground_truth_candidates(
+            query_vectors,
+            config.k,
+            config.distance_metric,
+            config.dataset_id,
+            tolerance,
+        )
+        ground_truth_computation_s = time.perf_counter() - ground_truth_started
+        if config.use_ground_truth_cache:
+            if len(_GROUND_TRUTH_CACHE) >= _GROUND_TRUTH_CACHE_LIMIT:
+                _GROUND_TRUTH_CACHE.pop(next(iter(_GROUND_TRUTH_CACHE)))
+            _GROUND_TRUTH_CACHE[cache_key] = ground_truth
+
     gt_ids = [g.ids for g in ground_truth]
     gt_candidates = [g.candidate_ids for g in ground_truth]
     tied_queries = sum(1 for g in ground_truth if g.is_tied)
     max_tied_candidates = max((len(g.candidate_ids) for g in ground_truth), default=0)
-    ground_truth_computation_s = time.perf_counter() - ground_truth_started
 
     # --- Retrieval under test ---------------------------------------------
+    retrieval_started = time.perf_counter()
     batch = vs.retrieve_batch(
         query_vectors,
         k=config.k,
@@ -248,6 +296,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         ef_search=config.ef_search,
         repetitions=config.repetitions,
     )
+    retrieval_batch_wall_time_s = time.perf_counter() - retrieval_started
 
     # --- Metrics per repetition -------------------------------------------
     metrics_started = time.perf_counter()
@@ -294,11 +343,13 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     metrics_computation_s = time.perf_counter() - metrics_started
 
     # Latency percentiles come from every measured observation, not from a
-    # per-repetition average.  The wall-clock time around the retrieval loop
-    # is *not* used here: the sum of individually timed queries avoids
-    # counting connection setup and result-conversion work twice.
+    # per-repetition average.  Two different retrieval durations are stored:
+    # the sum of the individually timed executions (a diagnostic subset of the
+    # batch wall time) and the elapsed wall time of the whole retrieve_batch
+    # call (a non-overlapping phase used in the runtime decomposition).
     lat = latency_stats(batch.latencies)
-    retrieval_total_s = sum(batch.latencies) / 1000.0
+    summed_query_execution_time_s = sum(batch.latencies) / 1000.0
+    retrieval_total_s = summed_query_execution_time_s  # legacy alias
     retrieval_mean_per_query_ms = (
         sum(batch.latencies) / len(batch.latencies) if batch.latencies else 0.0
     )
@@ -320,7 +371,6 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     used_seq_scan = batch.used_sequential_scan
     applied_ef = batch.applied_ef_search
 
-    fingerprint = dataset_fingerprint(config.dataset_id)
     index_build_s = (index_build_ms / 1000.0) if index_build_ms is not None else 0.0
 
     payload = {
@@ -367,6 +417,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         "benchmark_position": config.benchmark_position,
         "benchmark_seed": config.benchmark_seed,
         "benchmark_order": config.benchmark_order,
+        "run_id": config.run_id,
         "warm_cache": True,
         "latency_avg_ms": lat["avg"],
         "latency_p50_ms": lat["p50"],
@@ -379,7 +430,11 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         "index_preparation_s": index_preparation_s,
         "index_build_s": index_build_s,
         "ground_truth_computation_s": ground_truth_computation_s,
+        "ground_truth_cache_hit": cache_hit,
+        "ground_truth_lookup_s": ground_truth_lookup_s,
         "retrieval_total_s": retrieval_total_s,
+        "summed_query_execution_time_s": summed_query_execution_time_s,
+        "retrieval_batch_wall_time_s": retrieval_batch_wall_time_s,
         "retrieval_mean_per_query_ms": retrieval_mean_per_query_ms,
         "metrics_computation_s": metrics_computation_s,
         "persistence_s": 0.0,
@@ -409,6 +464,8 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
                 "benchmark_round": config.benchmark_round,
                 "benchmark_position": config.benchmark_position,
                 "benchmark_seed": config.benchmark_seed,
+                "run_id": config.run_id,
+                "ground_truth_cache_hit": cache_hit,
                 "benchmark_cache": "warm buffer cache; no cold-cache procedure was executed",
             }
         ),
@@ -432,21 +489,29 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     persistence_s = time.perf_counter() - persistence_started
 
     total_experiment_runtime_s = time.perf_counter() - started
-    overlapping_phases = (
+    # Non-overlapping phases.  summed_query_execution_time_s is deliberately
+    # excluded: it is a subset of retrieval_batch_wall_time_s and subtracting
+    # both would double-count retrieval.
+    non_overlapping_phases = (
         index_preparation_s
         + ground_truth_computation_s
-        + retrieval_total_s
+        + ground_truth_lookup_s
+        + retrieval_batch_wall_time_s
         + metrics_computation_s
         + persistence_s
     )
-    orchestration_overhead_s = max(0.0, total_experiment_runtime_s - overlapping_phases)
+    orchestration_overhead_s = max(0.0, total_experiment_runtime_s - non_overlapping_phases)
 
     timing_columns = {
         "total_experiment_runtime_s": total_experiment_runtime_s,
         "index_preparation_s": index_preparation_s,
         "index_build_s": index_build_s,
         "ground_truth_computation_s": ground_truth_computation_s,
+        "ground_truth_cache_hit": cache_hit,
+        "ground_truth_lookup_s": ground_truth_lookup_s,
         "retrieval_total_s": retrieval_total_s,
+        "summed_query_execution_time_s": summed_query_execution_time_s,
+        "retrieval_batch_wall_time_s": retrieval_batch_wall_time_s,
         "retrieval_mean_per_query_ms": retrieval_mean_per_query_ms,
         "metrics_computation_s": metrics_computation_s,
         "persistence_s": persistence_s,

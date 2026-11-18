@@ -151,11 +151,17 @@ class TestRunnerContract:
             "benchmark_position",
             "benchmark_seed",
             "warm_cache",
+            "experiment_id",
+            "run_id",
             "total_experiment_runtime_s",
             "index_preparation_s",
             "index_build_s",
             "ground_truth_computation_s",
+            "ground_truth_cache_hit",
+            "ground_truth_lookup_s",
             "retrieval_total_s",
+            "summed_query_execution_time_s",
+            "retrieval_batch_wall_time_s",
             "retrieval_mean_per_query_ms",
             "metrics_computation_s",
             "persistence_s",
@@ -258,6 +264,7 @@ class TestMainSmoke:
         details_path = tmp_path / "repetition_details.csv"
         summary_path = tmp_path / "repetition_summary.csv"
         samples_path = tmp_path / "query_samples.json"
+        orders_path = tmp_path / "benchmark_orders.json"
 
         argv = [
             "run_experiments.py",
@@ -295,6 +302,10 @@ class TestMainSmoke:
             str(summary_path),
             "--query-samples",
             str(samples_path),
+            "--benchmark-orders",
+            str(orders_path),
+            "--run-id",
+            "pytest-smoke",
         ]
         monkeypatch.setattr(sys, "argv", argv)
 
@@ -321,7 +332,10 @@ class TestMainSmoke:
             assert row["query_sampling"] == "stratified"
             assert row["query_sample_seed"] == "9"
             assert row["benchmark_seed"] == "5"
+            assert row["run_id"] == "pytest-smoke"
             assert row["warm_cache"] == "True"
+            assert row["experiment_id"].isdigit()
+            assert row["summed_query_execution_time_s"] == row["retrieval_total_s"]
             assert float(row["total_experiment_runtime_s"]) > 0
 
         # Every round is a permutation of all requested configurations.
@@ -381,4 +395,16 @@ class TestMainSmoke:
         for value in samples.values():
             assert value["query_sampling"] == "stratified"
             assert len(value["query_ids"]) == 10
+
+        orders = json.loads(orders_path.read_text(encoding="utf-8"))
+        assert len(orders) == 2  # one size, two rounds
+        for value in orders.values():
+            assert value["order_seed"] == 5
+            assert value["training_pool_seed"] == 0
+            assert value["query_sample_seed"] == 9
+            assert value["run_id"] == "pytest-smoke"
+            assert sorted(value["order"]) == [
+                "exact:-", "hnsw:10", "hnsw:40",
+            ]
+            assert len(value["experiment_ids"]) == 3
 

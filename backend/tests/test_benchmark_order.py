@@ -72,3 +72,52 @@ class TestBalancedRounds:
             balanced_rounds(["a", "a"], rounds=1, seed=0)
         with pytest.raises(ValueError):
             balanced_rounds(KEYS, rounds=0, seed=0)
+
+
+MATRIX = ["exact:-"] + [f"hnsw:{ef}" for ef in (10, 25, 50, 100, 200, 400)]
+
+
+class TestActualBenchmarkMatrix:
+    """Exhaustive checks for the supported 7-configuration, 3-round matrix."""
+
+    @pytest.mark.parametrize("seed", [0, 1, 7, 42, 12345, -17, 10**9])
+    def test_positions_are_balanced_for_supported_matrix(self, seed: int) -> None:
+        rounds = balanced_rounds(MATRIX, rounds=3, seed=seed)
+        for order in rounds:
+            assert sorted(order) == sorted(MATRIX)
+
+        # Each configuration occupies three different positions.
+        for key in MATRIX:
+            positions_used = [order.index(key) + 1 for order in rounds]
+            assert len(set(positions_used)) == 3
+
+        # Each position is occupied by three different configurations.
+        for position in range(1, len(MATRIX) + 1):
+            occupants = [order[position - 1] for order in rounds]
+            assert len(set(occupants)) == 3
+
+        # Every configuration has an early and a late slot.
+        for key in MATRIX:
+            positions_used = [order.index(key) + 1 for order in rounds]
+            assert min(positions_used) <= len(MATRIX) // 2
+            assert max(positions_used) > len(MATRIX) // 2
+
+    @pytest.mark.parametrize("seed", [0, 42, -7])
+    def test_exact_is_not_fixed_in_a_position_relative_to_hnsw(
+        self, seed: int
+    ) -> None:
+        rounds = balanced_rounds(MATRIX, rounds=3, seed=seed)
+        exact_positions = [order.index("exact:-") + 1 for order in rounds]
+        assert len(set(exact_positions)) > 1
+        assert not (max(exact_positions) <= 2 or min(exact_positions) >= 7)
+        for key in MATRIX:
+            if key == "exact:-":
+                continue
+            assert [order.index(key) + 1 for order in rounds] != exact_positions
+
+    def test_seed_changes_orders_for_supported_matrix(self) -> None:
+        first = balanced_rounds(MATRIX, rounds=3, seed=1)
+        second = balanced_rounds(MATRIX, rounds=3, seed=2)
+        assert first != second
+        for order in (first[0], second[0]):
+            assert sorted(order) == sorted(MATRIX)

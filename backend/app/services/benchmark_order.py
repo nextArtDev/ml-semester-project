@@ -7,14 +7,27 @@ slower simply because of what ran before it.
 
 This module builds *paired rounds*.  Each round contains every requested
 configuration exactly once.  A seed chooses a base permutation, and successive
-rounds rotate that permutation by ``ceil(n / rounds)`` positions, so a
-configuration that ran early in one round runs late in another.  With two
-rounds every configuration appears in both halves of the sequence; with more
-rounds the coverage improves further.
+rounds rotate it by ``floor(n / rounds)`` (at least 1) positions.  The order is
+a pure function of the keys, the round count and the seed, so it is reproducible
+and testable without a database.  It does not rebuild an index or change any
+experiment configuration.
 
-The order is a pure function of the requested keys, the round count and the
-seed, which makes it reproducible and independently testable without a
-database.  It does not rebuild an index or change any experiment configuration.
+What is and is not guaranteed
+-----------------------------
+* **Always:** each round is a permutation of all keys, positions are
+  deterministic for a given seed, and a different seed generally gives a
+  different valid order.
+* **For the supported benchmark matrix (7 configurations, 3 rounds):** tests
+  verify exhaustively that every configuration occupies three distinct
+  positions, every position is occupied by three different configurations
+  across rounds, and every configuration has at least one early and one late
+  position.  This is demonstrated by exhaustive tests, not asserted as a
+  general theorem.
+* **Not claimed:** perfect positional balance for arbitrary ``(n, rounds)``
+  pairs.  In particular with two rounds and an odd number of configurations
+  it is mathematically impossible for every configuration to appear in both
+  halves.  Callers needing that property should use three or more rounds and
+  verify their own matrix.
 """
 
 from __future__ import annotations
@@ -53,10 +66,9 @@ def balanced_rounds(keys: Sequence[str], rounds: int, seed: int) -> list[list[st
 
     base = list(key_list)
     random.Random(seed).shuffle(base)
-    # A floor step makes three or more rounds visit every position exactly
-    # once and guarantees an early/late alternation.  With two rounds and an
-    # odd number of configurations a perfect split is mathematically
-    # impossible, so callers that need the guarantee should use >= 3 rounds.
+    # A floor step spreads configurations across distinct positions for the
+    # supported 7 x 3 matrix (verified exhaustively in the tests).  No perfect
+    # balance is claimed for arbitrary (n, rounds) combinations.
     step = max(1, len(base) // rounds)
     return [
         [base[(index + round_index * step) % len(base)] for index in range(len(base))]

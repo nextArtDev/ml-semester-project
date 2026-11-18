@@ -8,6 +8,7 @@ non-overlapping, non-negative, and consistent with the stored latencies.
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -89,7 +90,8 @@ def timing_dataset() -> int:
 PHASES = (
     "index_preparation_s",
     "ground_truth_computation_s",
-    "retrieval_total_s",
+    "ground_truth_lookup_s",
+    "retrieval_batch_wall_time_s",
     "metrics_computation_s",
     "persistence_s",
     "orchestration_overhead_s",
@@ -156,6 +158,56 @@ class TestTimingAccounting:
             float(row["avg"]),
             rel_tol=1e-9,
         )
+        assert math.isclose(
+            float(result["summed_query_execution_time_s"]),
+            float(result["retrieval_total_s"]),
+            rel_tol=1e-12,
+        )
+        assert result["retrieval_batch_wall_time_s"] > 0
+        # Wall time includes the summed executions plus loop and conversion
+        # overhead; it is the non-overlapping phase used in the decomposition.
+        assert result["retrieval_batch_wall_time_s"] >= 0
+        assert result["ground_truth_lookup_s"] >= 0
+        assert isinstance(result["ground_truth_cache_hit"], bool)
+
+    def test_ground_truth_cache_is_keyed_and_documented(self, timing_dataset: int) -> None:
+        from app.services.experiments import (  # local import keeps the top tidy
+            clear_ground_truth_cache,
+            ground_truth_cache_key,
+        )
+
+        clear_ground_truth_cache()
+        base = ExperimentConfig(dataset_id=timing_dataset, k=3, max_queries=10)
+        first = run_experiment(base)
+        second = run_experiment(base)
+        assert first["ground_truth_cache_hit"] is False
+        assert second["ground_truth_cache_hit"] is True
+        assert second["ground_truth_computation_s"] == 0.0
+        assert second["recall_at_k"] == first["recall_at_k"]
+        assert second["accuracy"] == first["accuracy"]
+
+        fingerprint = first["dataset_fingerprint"]
+        ids = first["evaluated_query_ids"]
+        if isinstance(ids, str):
+            ids = json.loads(ids)
+        key = ground_truth_cache_key(fingerprint, ids, base)
+        other_k = ground_truth_cache_key(
+            fingerprint, ids, ExperimentConfig(dataset_id=timing_dataset, k=5)
+        )
+        other_pool = ground_truth_cache_key("different-fingerprint", ids, base)
+        assert key != other_k and key != other_pool
+
+        # Disabling the cache recomputes but leaves the measurement identical.
+        uncached = run_experiment(
+            ExperimentConfig(
+                dataset_id=timing_dataset,
+                k=3,
+                max_queries=10,
+                use_ground_truth_cache=False,
+            )
+        )
+        assert uncached["ground_truth_cache_hit"] is False
+        assert uncached["recall_at_k"] == first["recall_at_k"]
 
     def test_fresh_build_and_reuse_are_separated(self, timing_dataset: int) -> None:
         fresh = run_experiment(
