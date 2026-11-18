@@ -130,7 +130,7 @@ Runs one experiment.
 | `ef_search` | int \| null | `hnsw.ef_search`, 1–1000. Query-time only. |
 | `hnsw_m` | int | Build parameter — changing it forces an index rebuild |
 | `hnsw_ef_construction` | int | Build parameter |
-| `max_queries` | int \| null | Number of distinct test vectors to query |
+| `max_queries` | int \| null | Number of distinct test vectors; `null` means all (the runner maps `--max-queries 0` to `null`) |
 | `repetitions` | int | Complete timed passes over that query set, 1–100 |
 | `seed` | int | Reproducibility seed recorded on the run |
 | `query_sampling` | `first` \| `stratified` | Stratified is the documented default for new artifacts |
@@ -190,7 +190,11 @@ Response (abridged):
   "total_experiment_runtime_s": 12.34,
   "index_preparation_s": 0.01,
   "index_build_s": 0.0,
-  "ground_truth_computation_s": 8.12,
+  "ground_truth_computation_s": 0.00,
+  "ground_truth_cache_hit": true,
+  "ground_truth_lookup_s": 0.0001,
+  "retrieval_batch_wall_time_s": 1.21,
+  "summed_query_execution_time_s": 1.14,
   "retrieval_total_s": 1.14,
   "retrieval_mean_per_query_ms": 0.38,
   "metrics_computation_s": 0.01,
@@ -207,8 +211,10 @@ Response (abridged):
 > `index_reused_build_ms`. The reported `hnsw_m` / `hnsw_ef_construction` come
 > from the live index, not from the request defaults.
 >
-> The timing fields are non-overlapping `perf_counter` intervals. `index_build_s`
-> is 0 when the index was reused, and is a subset of `index_preparation_s`.
+> The timing fields use `perf_counter`. `summed_query_execution_time_s` is a
+> subset of `retrieval_batch_wall_time_s`; only the wall time is part of the
+> non-overlapping decomposition. `index_build_s` is 0 when the index was reused,
+> and is a subset of `index_preparation_s`.
 > The legacy `api_overhead_s` is no longer written: it was total runtime minus
 > query time and therefore included ground-truth computation and orchestration.
 > `benchmark_*` fields are populated by the batch runner; direct API calls

@@ -1,0 +1,170 @@
+{
+  "10000:1": {
+    "dataset_id": 116,
+    "train_size_target": 10000,
+    "train_size_actual": 10000,
+    "benchmark_round": 1,
+    "order_seed": 0,
+    "training_pool_seed": 0,
+    "query_sample_seed": 0,
+    "run_id": "final-v3-full-pool",
+    "order": [
+      "hnsw:100",
+      "hnsw:25",
+      "hnsw:10",
+      "exact:-",
+      "hnsw:200",
+      "hnsw:50",
+      "hnsw:400"
+    ],
+    "experiment_ids": [
+      320,
+      321,
+      322,
+      323,
+      324,
+      325,
+      326
+    ]
+  },
+  "10000:2": {
+    "dataset_id": 116,
+    "train_size_target": 10000,
+    "train_size_actual": 10000,
+    "benchmark_round": 2,
+    "order_seed": 0,
+    "training_pool_seed": 0,
+    "query_sample_seed": 0,
+    "run_id": "final-v3-full-pool",
+    "order": [
+      "hnsw:10",
+      "exact:-",
+      "hnsw:200",
+      "hnsw:50",
+      "hnsw:400",
+      "hnsw:100",
+      "hnsw:25"
+    ],
+    "experiment_ids": [
+      327,
+      328,
+      329,
+      330,
+      331,
+      332,
+      333
+    ]
+  },
+  "10000:3": {
+    "dataset_id": 116,
+    "train_size_target": 10000,
+    "train_size_actual": 10000,
+    "benchmark_round": 3,
+    "order_seed": 0,
+    "training_pool_seed": 0,
+    "query_sample_seed": 0,
+    "run_id": "final-v3-full-pool",
+    "order": [
+      "hnsw:200",
+      "hnsw:50",
+      "hnsw:400",
+      "hnsw:100",
+      "hnsw:25",
+      "hnsw:10",
+      "exact:-"
+    ],
+    "experiment_ids": [
+      334,
+      335,
+      336,
+      337,
+      338,
+      339,
+      340
+    ]
+  },
+  "50000:1": {
+    "dataset_id": 116,
+    "train_size_target": 50000,
+    "train_size_actual": 50000,
+    "benchmark_round": 1,
+    "order_seed": 0,
+    "training_pool_seed": 0,
+    "query_sample_seed": 0,
+    "run_id": "final-v3-full-pool",
+    "order": [
+      "hnsw:100",
+      "hnsw:25",
+      "hnsw:10",
+      "exact:-",
+      "hnsw:200",
+      "hnsw:50",
+      "hnsw:400"
+    ],
+    "experiment_ids": [
+      341,
+      342,
+      343,
+      344,
+      345,
+      346,
+      347
+    ]
+  },
+  "50000:2": {
+    "dataset_id": 116,
+    "train_size_target": 50000,
+    "train_size_actual": 50000,
+    "benchmark_round": 2,
+    "order_seed": 0,
+    "training_pool_seed": 0,
+    "query_sample_seed": 0,
+    "run_id": "final-v3-full-pool",
+    "order": [
+      "hnsw:10",
+      "exact:-",
+      "hnsw:200",
+      "hnsw:50",
+      "hnsw:400",
+      "hnsw:100",
+      "hnsw:25"
+    ],
+    "experiment_ids": [
+      348,
+      349,
+      350,
+      351,
+      352,
+      353,
+      354
+    ]
+  },
+  "50000:3": {
+    "dataset_id": 116,
+    "train_size_target": 50000,
+    "train_size_actual": 50000,
+    "benchmark_round": 3,
+    "order_seed": 0,
+    "training_pool_seed": 0,
+    "query_sample_seed": 0,
+    "run_id": "final-v3-full-pool",
+    "order": [
+      "hnsw:200",
+      "hnsw:50",
+      "hnsw:400",
+      "hnsw:100",
+      "hnsw:25",
+      "hnsw:10",
+      "exact:-"
+    ],
+    "experiment_ids": [
+      355,
+      356,
+      357,
+      358,
+      359,
+      360,
+      361
+    ]
+  }
+}

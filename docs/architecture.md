@@ -83,15 +83,29 @@ in `experiment_repetitions`; they are not inferred from the aggregate row.
 A fixed exact-first / ascending-`ef_search` order gives each configuration a
 different cache and scheduler environment, so execution order is a confound.
 `benchmark_order.balanced_rounds(keys, rounds, seed)` builds a seeded base
-permutation and rotates it by `floor(n / rounds)` positions per round. Each
-round is a permutation of all configurations; with three or more rounds every
-configuration appears both early and late. The runner persists the round,
-position, seed and the round's complete order on each experiment row.
+permutation and rotates it by `floor(n / rounds)` (at least 1) positions per
+round. Each round is a permutation of all configurations. Exhaustive tests
+verify that, for the supported 7-configuration / 3-round matrix, every
+configuration visits three distinct positions, every position is occupied by
+three different configurations, and no configuration is systematically early or
+late. No perfect balance is claimed for arbitrary matrix sizes; with two rounds
+and an odd configuration count it is mathematically impossible.
 
-The index is not rebuilt between configurations or rounds: only `ef_search`
-changes. Speed-ups use the mean exact baseline across rounds rather than one
-adjacent run. All measurements are explicitly warm-cache; no cold-cache result
-is claimed.
+The runner persists the round, position, seed and the round's complete order on
+each experiment row and writes `benchmark_orders.json`. The index is not
+rebuilt between configurations or rounds: only `ef_search` changes. Speed-ups
+use the mean exact baseline across rounds rather than one adjacent run. All
+measurements are explicitly warm-cache; no cold-cache result is claimed.
+
+### Three levels of repetition
+
+* An **individual query latency** is one stored timing for one query id.
+* A **repetition** replays the entire query set in the same order; its spread
+  measures run-to-run timing variability.
+* A **benchmark round** permutes configuration order only; it is a pairing
+  mechanism, not an independent replicate of the system.
+
+These levels must not be treated as interchangeable statistical samples.
 
 ## Query selection
 
@@ -102,18 +116,46 @@ one-slot minimum for present classes when the sample is large enough, then
 samples within each class with a seed derived from the global seed and class
 label. Ids are sorted, so exact and HNSW use the same queries in the same
 order. The ids, sampling mode, seed and both class distributions are persisted
-and exported. `--max-queries 0` evaluates the entire test pool.
+and exported to `query_samples.json`. `--max-queries 0` evaluates the entire
+test pool, which is what the final benchmark used.
+
+Training-pool subsampling uses the same largest-remainder allocator, so the
+resulting table has **exactly** the requested size whenever the pool permits.
+Within each class, kept ids are chosen by
+`random.Random(f"{seed}:{label}").sample(ids, n)`. This replaces the earlier
+`SELECT setseed(seed / 10000.0)` call: `setseed` accepts only values in `[-1, 1]`,
+so a seed above 10,000 was out of range. The new mapping accepts any integer
+(0, 42, large positive and negative are all tested), is deterministic for a
+given seed, and different seeds can yield different pools.
 
 ## Timing decomposition
 
-`run_experiment` measures non-overlapping phases with `time.perf_counter()`:
-total runtime, index preparation (with fresh build time as a subset), ground
-truth, retrieval (the sum of individually stored query latencies), metrics,
-persistence and an orchestration residual. A reused index contributes zero
-`index_build_s`; its historical duration stays in `index_reused_build_ms`.
-The retired `api_overhead_s` was `runtime − query_time`, which incorrectly
-labelled ground-truth computation and orchestration as API overhead. HTTP
-latency must be measured separately at the request boundary.
+`run_experiment` measures phases with `time.perf_counter()`. Two retrieval
+durations are reported: `summed_query_execution_time_s` is the sum of the
+individually timed query executions (with `retrieval_total_s` as a legacy
+alias), while `retrieval_batch_wall_time_s` is the elapsed wall time of the
+whole `retrieve_batch` call. The former is a subset of the latter, so only the
+wall time participates in the non-overlapping decomposition:
+
+`total = index_preparation + ground_truth_computation + ground_truth_lookup +
+retrieval_batch_wall + metrics + persistence + orchestration_overhead`.
+
+A reused index contributes zero `index_build_s`, which is itself a subset of
+`index_preparation_s`. The retired `api_overhead_s` was `runtime − query_time`,
+which incorrectly labelled ground-truth computation and orchestration as API
+overhead. None of these fields is an HTTP latency; that must be measured at the
+request boundary.
+
+### Exact ground-truth cache
+
+Ground truth depends only on pool fingerprint, query ids, k, metric and tie
+tolerance (the key is built by `ground_truth_cache_key`). A bounded in-process
+cache reuses it across configurations and rounds of the same sweep. It is
+computed before retrieval, so it cannot affect measured query latency. Each
+experiment records `ground_truth_cache_hit` and `ground_truth_lookup_s`; the
+final run had 2 misses (one per pool) and 40 hits. A different fingerprint,
+query set, k, metric or tolerance is a different key, so no result can be
+reused across those dimensions.
 
 ## Index reuse
 

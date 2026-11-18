@@ -32,7 +32,7 @@ ml-semester-project/
 │   │       ├── preprocessing.py    Leakage-free preprocessing
 │   │       └── vector_store.py     Exact vs HNSW retrieval (pgvector)
 │   ├── scripts/                    Batch runner + dataset statistics
-│   └── tests/        pytest suite (211 passed, 1 skip)
+│   └── tests/        pytest suite (241 passed, 1 skip)
 ├── frontend/         Next.js 16 + TypeScript + Tailwind v4 (bilingual EN/FA)
 │   ├── app/[locale]/ Overview · Datasets · Experiments · Compare · Methodology
 │   ├── components/   UI + feature components
@@ -179,32 +179,40 @@ runner prints a warning when that happens.
 `--repetitions N` executes **N complete timed passes** over the same query set,
 in the same query order. It is not a multiplier applied to a counter.
 Every individual latency is stored in `query_latencies` with its repetition
-number, so a run with 1,000 queries and 3 repetitions stores exactly 3,000
-rows. The warm-up query runs once, before the first timed query, and is never
+number. The warm-up query runs once, before the first timed query, and is never
 stored.
 
-`--rounds R` runs the whole configuration matrix R times in a seeded, balanced
-order. Each round contains every configuration exactly once; with three or more
-rounds every configuration appears both early and late. The order is derived
-from `--order-seed`, persisted as `benchmark_round`, `benchmark_position`,
-`benchmark_seed` and `benchmark_order`, and exported in the sweep. The HNSW
-index is built once per pool and reused across `ef_search` values and rounds.
+`--rounds R` runs the whole configuration matrix R times in a seeded order.
+Each round contains every configuration exactly once. For the supported 7×3
+matrix, exhaustive tests demonstrate that every configuration visits three
+distinct positions and has both early and late slots; no perfect balance is
+claimed for arbitrary matrix sizes. The order is derived from `--order-seed`,
+persisted as `benchmark_round`, `benchmark_position`, `benchmark_seed` and
+`benchmark_order`, and exported to `benchmark_orders.json`. The HNSW index is
+built once per pool and reused across `ef_search` values and rounds.
+
+Three distinct levels must not be conflated:
+
+| Level | What varies | What it measures |
+| --- | --- | --- |
+| Query observations | Query id | Per-query latency over the whole held-out pool |
+| Repetitions (3) | Nothing but time | Run-to-run timing variability |
+| Benchmark rounds (3) | Configuration order only | Fairness of early/late position |
 
 Five quantities are reported separately:
 
-| Quantity | Example |
+| Quantity | Final benchmark |
 | --- | --- |
 | Held-out test pool | 3,000 rows |
-| Unique evaluated queries | 1,000 |
+| Unique evaluated queries | 3,000 (all rows) |
 | Repetitions | 3 |
 | Benchmark rounds | 3 |
-| Latency observations | 1,000 × 3 × 3 = 9,000 per configuration |
+| Latency observations | 3,000 × 3 × 3 = 27,000 per configuration; 378,000 total |
 
-Repetitions expose run-to-run variability. They are **not** independent
-samples of a population: the query set, order and index are held fixed. Rounds
-change configuration order, not the query sample. Per-repetition metrics are
-written to `experiment_repetitions`; cross-repetition medians, standard
-deviations and 95 % intervals are exported alongside the sweep.
+None of these levels is an independent statistical sample of a population.
+Per-repetition metrics are written to `experiment_repetitions`; cross-repetition
+medians, standard deviations and 95 % intervals are exported alongside the
+sweep.
 
 ### Query selection
 
@@ -264,71 +272,85 @@ cd backend
     --sizes 10000,50000 `
     --ef-search 10,25,50,100,200,400 `
     --k 5 --metric l2 `
-    --max-queries 1000 `
+    --max-queries 0 `
     --repetitions 3 --seed 0 `
     --rounds 3 --order-seed 0 `
     --query-sampling stratified --query-sample-seed 0 `
+    --run-id final-v3-full-pool `
     --output ..\docs\results\sweep.csv `
     --json ..\docs\results\sweep.json `
     --repetition-details ..\docs\results\repetition_details.csv `
     --repetition-summary ..\docs\results\repetition_summary.csv `
-    --query-samples ..\docs\results\query_samples.json
+    --query-samples ..\docs\results\query_samples.json `
+    --benchmark-orders ..\docs\results\benchmark_orders.json
 ```
 
-The run prints one line per execution in balanced-round order. Aggregated over
-the three rounds, the measured output on dataset 116 was:
+Aggregated over the three rounds, the measured output on dataset 116 with all
+3,000 held-out queries was:
 
 ```
    rows method  ef  recall    acc  macroF1    p50(ms)  speed-up
-   9999  exact   -  1.0000  0.7530   0.5255      2.765         -
-   9999   hnsw  10  0.9938  0.7530   0.5241      0.214      12.9x
-   9999   hnsw  25  0.9988  0.7530   0.5255      0.250      11.1x
-   9999   hnsw  50  0.9994  0.7530   0.5255      0.304       9.1x
-   9999   hnsw 100  1.0000  0.7530   0.5255      0.399       6.9x
-   9999   hnsw 200  1.0000  0.7530   0.5255      0.576       4.8x
-   9999   hnsw 400  1.0000  0.7530   0.5255      0.929       3.0x
-  50000  exact   -  1.0000  0.8530   0.7166     10.812         -
-  50000   hnsw  10  0.9902  0.8520   0.7184      0.240      45.2x
-  50000   hnsw  25  0.9966  0.8520   0.7162      0.274      39.5x
-  50000   hnsw  50  0.9978  0.8520   0.7162      0.337      32.1x
-  50000   hnsw 100  0.9998  0.8520   0.7162      0.461      23.5x
-  50000   hnsw 200  0.9998  0.8520   0.7162      0.683      15.8x
-  50000   hnsw 400  0.9998  0.8520   0.7162      1.147       9.4x
+  10000  exact   -  1.0000  0.7553   0.5623      2.823         -
+  10000   hnsw  10  0.9941  0.7547   0.5602      0.223      12.7x
+  10000   hnsw  25  0.9989  0.7553   0.5613      0.257      11.0x
+  10000   hnsw  50  0.9997  0.7553   0.5613      0.320       8.8x
+  10000   hnsw 100  0.9999  0.7553   0.5623      0.416       6.8x
+  10000   hnsw 200  0.9999  0.7553   0.5623      0.600       4.7x
+  10000   hnsw 400  0.9999  0.7553   0.5623      1.004       2.8x
+  50000  exact   -  1.0000  0.8440   0.7500     11.063         -
+  50000   hnsw  10  0.9854  0.8423   0.7470      0.246      45.1x
+  50000   hnsw  25  0.9942  0.8443   0.7499      0.280      39.6x
+  50000   hnsw  50  0.9974  0.8437   0.7499      0.363      30.6x
+  50000   hnsw 100  0.9989  0.8440   0.7500      0.465      23.8x
+  50000   hnsw 200  0.9997  0.8440   0.7500      0.753      14.7x
+  50000   hnsw 400  0.9998  0.8440   0.7500      1.224       9.1x
 ```
 
-These figures use a stratified query sample and balanced rounds; they differ
-from the preserved v1 artifacts in [`docs/results/v1/`](docs/results/v1/README.md)
-and must not be mixed with them. The HNSW index is built once per pool size and
-**reused** across `ef_search` values and rounds; reused rows record
-`index_build_ms = NULL`, `index_reused = True`, and the original build time in
-`index_reused_build_ms`.
+These figures evaluate the whole held-out pool; they differ from the preserved
+[`v1/`](docs/results/v1/README.md) and [`v2/`](docs/results/v2/README.md)
+artifacts and must not be mixed with them. The HNSW index is built once per
+pool size and **reused** across all ef values and rounds.
+
+Validate the artifacts with:
+
+```powershell
+.venv\Scripts\python -m scripts.verify_results `
+    --run-id final-v3-full-pool --expected-runs 42 --expected-rounds 3 `
+    --expected-queries 3000 --expected-repetitions 3
+```
 
 ### Timing fields
 
-`api_overhead_s` was removed from new artifacts because it charged ground-truth
-computation, index preparation, metrics and persistence to "API overhead". The
-replacement fields, all measured with `time.perf_counter()`, are:
+`api_overhead_s` was removed because it charged ground-truth computation, index
+preparation, metrics and persistence to "API overhead". The replacement fields,
+all measured with `time.perf_counter()`, are:
 
 | Field | Definition |
 | --- | --- |
 | `total_experiment_runtime_s` | Start of `run_experiment` through persistence |
 | `index_preparation_s` | Build-or-reuse decision, `ANALYZE`, metadata readback |
-| `index_build_s` | Fresh `CREATE INDEX` only; a subset of the above and 0 on reuse |
-| `ground_truth_computation_s` | Exhaustive query and boundary candidates for all queries |
-| `retrieval_total_s` | Sum of the individually stored query latencies |
-| `retrieval_mean_per_query_ms` | Mean of those latencies |
+| `index_build_s` | Fresh `CREATE INDEX` only; subset of preparation, 0 on reuse |
+| `ground_truth_computation_s` | Exhaustive neighbours actually computed this run |
+| `ground_truth_cache_hit` / `ground_truth_lookup_s` | Cache status and lookup time for the keyed ground truth |
+| `retrieval_batch_wall_time_s` | Elapsed wall time of the whole retrieval batch |
+| `summed_query_execution_time_s` | Sum of the individually timed query executions (subset of the wall time) |
+| `retrieval_total_s` | Legacy alias of the summed execution time |
+| `retrieval_mean_per_query_ms` | Mean of the individual latencies |
 | `metrics_computation_s` | Majority vote, scores and cross-repetition summary |
 | `persistence_s` | Experiment, repetition and latency inserts |
 | `orchestration_overhead_s` | Residual: loading, counting, fingerprint, loop overhead |
 
-The intervals are non-overlapping and sum to at most the total. Actual HTTP
-request latency, if wanted, must be measured separately at the HTTP boundary.
+Only the non-overlapping phases (batch wall time, not the summed subset) are
+subtracted from the total to form the residual. None of these fields is an HTTP
+latency; that must be measured at the request boundary. The ground truth is
+cached on pool fingerprint, query ids, k, metric and tolerance; 2 misses and 40
+hits occurred in the final run.
 
 Dataset-level duplicate and tie statistics, used to interpret Recall@K:
 
 ```powershell
 .venv\Scripts\python -m scripts.dataset_statistics `
-    --dataset-id 116 --k 5 --metric l2 --max-queries 1000 `
+    --dataset-id 116 --k 5 --metric l2 --max-queries 3000 `
     --output ..\docs\results\duplicate_stats.json
 ```
 
@@ -341,11 +363,14 @@ cd backend
 .venv\Scripts\python -m pytest
 ```
 
-The suite contains **211 passing tests and 1 documented skip** (cosine
+The suite contains **241 passing tests and 1 documented skip** (cosine
 distance is discrete for collinear vectors, so a near-zero non-zero boundary
 cannot be constructed). It covers classification/metric maths, tie-aware and
 conventional Recall@K, tolerance validation for L2/cosine/L1, the leakage
-contract of preprocessing, stratified splitting and query selection, and —
+contract of preprocessing, stratified splitting and query selection,
+exhaustive balance checks for the supported benchmark matrix, exact
+training-pool allocation for arbitrary integer seeds, timing/cache semantics,
+and —
 against a live database — exact/HNSW retrieval, deterministic tie-breaking,
 index build/reuse bookkeeping, repetition accounting, persisted latency-row
 counts, balanced execution order, timing decomposition and the batch runner's

@@ -32,28 +32,31 @@ held-out pool, fingerprint `6baa8fa283ea5a8267d3e964eedf5d2a` at full size.
 
 Five quantities are reported separately:
 
-| Quantity | Definition | Example |
+| Quantity | Definition | Final benchmark |
 | --- | --- | --- |
 | Held-out test pool | Size of the query pool | 3,000 |
-| Unique evaluated queries | Queries actually executed | 1,000 |
+| Unique evaluated queries | Queries actually executed | 3,000 (all) |
 | Repetitions | Complete timed passes over that query set | 3 |
 | Benchmark rounds | Permutations of the configuration matrix | 3 |
-| Latency observations | Stored per-query samples | 42 × 3,000 = 126,000 |
+| Latency observations | Stored per-query samples | 42 × 3 × 3,000 = 378,000 |
+
+These are three different levels, not three estimates of the same quantity:
+query observations are raw samples, repetitions measure run-to-run timing
+variability over an identical query set, and rounds are order pairings.
 
 `--repetitions N` executes N full passes; it never multiplies a counter. Every
 sample carries `repetition` and `query_index`, and the stored count is verified
 against `repetitions × unique_queries`. One warm-up query runs before the first
-timed query and is never stored. The query order is identical across
-repetitions, so repetitions measure run-to-run variability, not population
-sampling.
+timed query and is never stored.
 
-`--rounds R` runs the matrix R times under a seeded balanced order. Each round
-is a permutation of all configurations; round *r* rotates a seeded base order
-by `floor(n_configurations / R)` positions. Three rounds guarantee that every
-configuration appears both early and late. The actual order, round, position
-and seed are persisted and exported. The HNSW index is not rebuilt between
-`ef_search` values or rounds. All measurements are warm-cache; no cold-cache
-procedure is executed or claimed.
+`--rounds R` runs the matrix R times under a seeded order. Each round is a
+permutation of all configurations; round *r* rotates a seeded base order by
+`floor(n_configurations / R)` positions. Exhaustive tests demonstrate balance
+for the supported 7×3 matrix; no perfect balance is claimed in general. The
+actual order, round, position and seed are persisted and exported to
+`benchmark_orders.json`. The HNSW index is not rebuilt between `ef_search`
+values or rounds. All measurements are warm-cache; no cold-cache procedure is
+executed or claimed.
 
 ## Query selection
 
@@ -63,27 +66,43 @@ present class when the requested sample is large enough, then seeded sampling
 within each class. Selected ids are sorted, identical for exact and HNSW,
 stored as `evaluated_query_ids` and exported to `query_samples.json`. The pool
 and evaluated class distributions are persisted on every experiment row.
-`--max-queries 0` evaluates the entire pool; `first` mode is retained only for
-reproducing older runs and is never described as representative.
+`--max-queries 0` evaluates the entire pool; the final benchmark used it, so
+the evaluated and pool distributions are identical. `first` mode is retained
+only for reproducing older runs and is never described as representative.
+
+Training-pool subsampling uses the same largest-remainder allocator, so the
+actual table size is exactly the requested target when feasible. Rows within a
+class are chosen by `random.Random(f"{seed}:{label}")`, which replaces the old
+`setseed(seed / 10000)` call: that mapping left PostgreSQL's accepted `[-1, 1]`
+range for arbitrary seeds, while the new one accepts any integer deterministically.
 
 ## Timing definitions
 
-All phases use `time.perf_counter()` and are non-overlapping:
+All phases use `time.perf_counter()`. `summed_query_execution_time_s` (and its
+legacy alias `retrieval_total_s`) is the sum of individually timed query
+executions; it is a **subset** of `retrieval_batch_wall_time_s`, the elapsed
+time of the whole retrieval batch. Only the wall time enters the
+non-overlapping decomposition:
 
 | Field | Includes |
 | --- | --- |
 | `total_experiment_runtime_s` | Whole `run_experiment` call through persistence |
 | `index_preparation_s` | Build-or-reuse decision, `ANALYZE`, metadata readback |
 | `index_build_s` | Only a fresh `CREATE INDEX`; 0 when reused, subset of preparation |
-| `ground_truth_computation_s` | Exhaustive query and boundary candidates |
-| `retrieval_total_s` | Sum of individually stored query latencies |
+| `ground_truth_computation_s` | Exhaustive neighbours actually computed this run |
+| `ground_truth_lookup_s` / `ground_truth_cache_hit` | Keyed cache lookup and whether it hit |
+| `retrieval_batch_wall_time_s` | Elapsed wall time of the whole retrieval batch |
+| `summed_query_execution_time_s` | Sum of individual timings (subset of wall time) |
+| `retrieval_mean_per_query_ms` | Mean of those individual timings |
 | `metrics_computation_s` | Voting, scores, cross-repetition summary |
 | `persistence_s` | Experiment, repetition and latency inserts |
 | `orchestration_overhead_s` | Residual: loading, counting, fingerprint, loop overhead |
 
 The retired `api_overhead_s` (runtime minus query time) was not API overhead:
 it included ground-truth computation and almost every other phase. HTTP request
-latency, if needed, must be measured at the HTTP boundary.
+latency, if needed, must be measured at the HTTP boundary. The ground-truth
+cache is keyed by pool fingerprint, query ids, k, metric and tolerance, is
+timed separately, and never affects measured query latency.
 
 ## Experiments
 
@@ -151,7 +170,7 @@ the candidate set, and the task to be indifferent between them.
 
 Measured, never assumed, by `scripts/dataset_statistics.py`. For the 50,000-row
 Covertype pool: 50,000 unique vectors, zero duplicate groups, zero mixed-label
-groups, zero tied queries in 1,000 (`k = 5`, L2), largest boundary candidate
+groups, zero tied queries in 3,000 (`k = 5`, L2), largest boundary candidate
 set 5. The raw 581,012-row file has 581,012 unique full-feature vectors. The
 duplicate explanation for the recall/accuracy gap is therefore rejected on
 this dataset. See [`results/duplicate_stats.json`](results/duplicate_stats.json).
@@ -163,28 +182,35 @@ cd backend
 
 # Duplicate/tie measurement
 .venv\Scripts\python -m scripts.dataset_statistics `
-    --dataset-id 116 --k 5 --metric l2 --max-queries 1000 `
+    --dataset-id 116 --k 5 --metric l2 --max-queries 3000 `
     --output ..\docs\results\duplicate_stats.json
 
-# Full balanced benchmark
+# Final balanced benchmark (all 3,000 held-out queries)
 .venv\Scripts\python -m scripts.run_experiments `
     --dataset-id 116 --sizes 10000,50000 `
     --ef-search 10,25,50,100,200,400 --k 5 --metric l2 `
-    --max-queries 1000 --repetitions 3 --seed 0 `
+    --max-queries 0 --repetitions 3 --seed 0 `
     --rounds 3 --order-seed 0 `
     --query-sampling stratified --query-sample-seed 0 `
+    --run-id final-v3-full-pool `
     --output ..\docs\results\sweep.csv `
     --json ..\docs\results\sweep.json `
     --repetition-details ..\docs\results\repetition_details.csv `
     --repetition-summary ..\docs\results\repetition_summary.csv `
-    --query-samples ..\docs\results\query_samples.json
+    --query-samples ..\docs\results\query_samples.json `
+    --benchmark-orders ..\docs\results\benchmark_orders.json
+
+# Strict artifact validation
+.venv\Scripts\python -m scripts.verify_results `
+    --run-id final-v3-full-pool --expected-runs 42 --expected-rounds 3 `
+    --expected-queries 3000 --expected-repetitions 3
 ```
 
 ## Threats to validity
 
-* **Query sampling.** 1,000 of 3,000 held-out rows are evaluated; a 0.1 pp
-  difference is one query. The stratified sample is close to the pool
-  distribution but is not the pool.
+* **Query population.** All 3,000 held-out rows are evaluated, so no query
+  sampling effect remains. A 0.03 pp difference is still one query, so small
+  differences are not interpreted as effects.
 * **Class imbalance.** Classes range from 14 to 1,463 rows in the 3,000-row
   held-out pool. Macro F1 accompanies accuracy.
 * **Correlated repetitions and rounds.** Repetitions share queries, order and
