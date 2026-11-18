@@ -1,0 +1,4 @@
+# Dependencies for regenerating the verified thesis and its figures.
+# Use the backend virtual environment, which already contains python-docx.
+matplotlib>=3.8
+python-docx>=1.1
