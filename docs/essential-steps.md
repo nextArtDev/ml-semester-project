@@ -180,10 +180,10 @@ rows, and `environment.applied_ef_search` equals the requested `ef_search`.
 `--benchmark-orders`, `--run-id`, `--repetition-details` and
 `--repetition-summary`. It also:
 
-1. Subsamples the training pool with an exact largest-remainder allocation, so
-   the target size is met exactly and classes remain represented. Within-class
-   sampling uses `random.Random(f"{seed}:{label}")`, accepting any integer seed
-   and avoiding PostgreSQL's `setseed` range restriction.
+1. Materialises each requested training size as a derived dataset with its own
+   preprocessing state, fitted on that size's training rows only. Class quotas
+   use an exact largest-remainder allocation, and within-class sampling uses
+   `random.Random(f"{seed}:{label}")`, accepting any integer seed.
 2. Selects the evaluated queries by a seeded stratified sample by default,
    persists their ids and both class distributions, and exports them to
    `query_samples.json`. `--max-queries 0` evaluates the whole pool.
@@ -201,8 +201,8 @@ rows, and `environment.applied_ef_search` equals the requested `ef_search`.
    the persisted run.
 6. Prints a stderr warning when a HNSW run reports `used_index_scan = False`,
    so a silent sequential-scan fallback cannot be mistaken for HNSW latency.
-7. Restores the original training pool in a `finally` block, even if a run
-   fails.
+7. Leaves the original dataset and its vector tables unchanged; derived
+   datasets retain their own preprocessing state and fingerprint for audit.
 
 **Acceptance check**
 
@@ -321,9 +321,9 @@ Remaining:
 4. `docs/api.md` — new timing and sampling fields.
 5. `docs/results/README.md` — final sweep, round positions, full-pool query
    ids, timing decomposition and v1/v2 comparison.
-6. The Word documents were deliberately **not** regenerated for this final
-   artifact set; they still describe the previous benchmark. They must not be
-   quoted for v3 numbers.
+6. `Thesis-Final-Verified.docx` is the authoritative v3 thesis. The older
+   `Thesis-KNN-PostgreSQL-Platform.docx` is preserved under `docs/archive/` as
+   a superseded document and must not be quoted for v3 numbers.
 
 **Acceptance check** — every number in the markdown docs traces to
 `docs/results/*.csv`, `docs/results/*.json` or a persisted experiment row.
@@ -361,16 +361,16 @@ Remaining:
       preserved.
 - [x] Timing decomposition replaces `api_overhead_s`; batched retrieval wall
       time is separated from summed query execution time.
-- [ ] Word documents regenerated to match the final v3 benchmark (intentionally
-      deferred).
+- [x] Authoritative v3 thesis identified as `Thesis-Final-Verified.docx`; older
+      thesis archived and marked superseded.
 - [x] Conventional and tie-aware Recall@K both implemented, persisted and
       reported; tie tolerance documented.
 - [x] Duplicate-vector and boundary-tie statistics measured for the pool and
       recorded in `duplicate_stats.json`.
 - [ ] UI shows preprocessing mode, repetitions, applied `ef_search`, index
       size and plan verification, in EN and FA.
-- [x] README, architecture, experiment plan, API doc and both `.docx` files
-      match the code and the verified benchmark.
+- [x] README, architecture, experiment plan, API doc and the authoritative
+      `.docx` thesis match the code and the v3 artifact integrity checks.
 - [x] Limitations stated honestly: warm cache, single machine,
       per-query round-trip, class imbalance, Covertype-only primary dataset,
       correlated repetitions and rounds, small query sample.

@@ -46,7 +46,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -474,3 +474,80 @@ def transform(
 def vector_literal(matrix: np.ndarray) -> list[str]:
     """Convert a float matrix into pgvector text literals."""
     return ["[" + ",".join(f"{v:.8g}" for v in row) + "]" for row in matrix]
+
+
+def parse_vector_literal(literal: str) -> list[float]:
+    """Parse one pgvector text literal into a list of floats."""
+    text = literal.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    if not text.strip():
+        return []
+    return [float(value) for value in text.split(",")]
+
+
+def inverse_transform_vectors(
+    embeddings: Sequence[str],
+    state: PreprocessState,
+) -> pd.DataFrame:
+    """Reconstruct the fitted input frame from stored pgvector literals.
+
+    This is used only to refit preprocessing for a smaller experimental pool
+    without adding raw frames to the database schema. It is exact enough for
+    the primary Covertype pipeline, which contains numeric and binary columns
+    only. Datasets with categorical one-hot blocks are rejected because an
+    all-zero block cannot be distinguished reliably from an unseen category.
+    """
+    if state.categorical_columns:
+        raise DataValidationError(
+            "Size-specific preprocessing refit is unavailable for datasets "
+            "with categorical one-hot blocks; raw category values are not stored."
+        )
+
+    parsed = [parse_vector_literal(value) for value in embeddings]
+    if parsed and any(len(row) != state.dimension for row in parsed):
+        raise DataValidationError(
+            "Stored vector dimension does not match the fitted preprocessing state."
+        )
+
+    matrix = np.asarray(parsed, dtype=np.float64).reshape(len(parsed), state.dimension)
+    frame = pd.DataFrame(index=range(len(parsed)))
+    offset = 0
+
+    if state.numeric_columns:
+        width = len(state.numeric_columns)
+        block = matrix[:, offset:offset + width].copy()
+        if state.numeric_scaler_mean and state.numeric_scaler_scale:
+            mean = np.asarray(state.numeric_scaler_mean, dtype=np.float64)
+            scale = np.asarray(state.numeric_scaler_scale, dtype=np.float64)
+            block = block * scale + mean
+        for index, column in enumerate(state.numeric_columns):
+            frame[column] = block[:, index]
+        offset += width
+
+    if state.binary_columns:
+        width = len(state.binary_columns)
+        block = matrix[:, offset:offset + width].copy()
+        if state.binary_scaler_mean and state.binary_scaler_scale:
+            mean = np.asarray(state.binary_scaler_mean, dtype=np.float64)
+            scale = np.asarray(state.binary_scaler_scale, dtype=np.float64)
+            block = block * scale + mean
+        block = np.rint(np.clip(block, 0.0, 1.0)).astype(np.int64)
+        for index, column in enumerate(state.binary_columns):
+            frame[column] = block[:, index]
+        offset += width
+
+    return frame
+
+
+def labels_to_original(encoded_labels: Sequence[int], state: PreprocessState) -> list[int]:
+    """Map encoded class indices back to the original label values."""
+    original: list[int] = []
+    for encoded in encoded_labels:
+        index = int(encoded)
+        if index < 0 or index >= len(state.class_labels):
+            raise DataValidationError(
+                f"Encoded label {index} is outside the fitted class list."
+            )
+        original.append(int(state.class_labels[index]))
+    return original

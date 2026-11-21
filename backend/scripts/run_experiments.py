@@ -13,8 +13,10 @@ Guarantees enforced by this script:
 
 * The exact and HNSW arms of a size share one training pool, one query set,
   one fitted preprocessing state, one metric and one ``k``.
-* The training pool is subsampled **stratified by label**, with a seeded
-  ``setseed`` so the same ``--seed`` reproduces the same pool.
+* Each requested pool size is materialised as a derived dataset with its own
+  preprocessing state, fitted on that size's training rows only. Within-class
+  selection uses ``random.Random(f"{seed}:{label}")``, so any integer seed is
+  reproducible without PostgreSQL's restricted ``setseed``.
 * Repetitions are real: the whole timed query set is replayed
   ``--repetitions`` times and every sample is stored.
 * A HNSW row whose execution plan did **not** use the index is printed as a
@@ -44,6 +46,15 @@ from app.core.database import execute, fetch_one  # noqa: E402
 from app.services import vector_store as vs  # noqa: E402
 from app.services.benchmark_order import balanced_rounds  # noqa: E402
 from app.services.classification import repetition_summary  # noqa: E402
+from app.services.dataset_stats import dataset_fingerprint  # noqa: E402
+from app.services.preprocessing import (  # noqa: E402
+    PreprocessState,
+    fit_preprocessor,
+    inverse_transform_vectors,
+    labels_to_original,
+    transform,
+    vector_literal,
+)
 from app.services.experiments import (  # noqa: E402
     ExperimentConfig,
     get_experiment,
@@ -272,15 +283,26 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # Training-pool management
 # ---------------------------------------------------------------------------
-def snapshot_pool(dataset_id: int) -> list[tuple]:
+def _snapshot_pool(dataset_id: int, which: str) -> list[tuple]:
+    table = vs.train_table(dataset_id) if which == "train" else vs.test_table(dataset_id)
     with vs.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 vs.sql.SQL(
                     "SELECT id, row_index, label, embedding::text FROM {t} ORDER BY id"
-                ).format(t=vs.sql.Identifier(vs.train_table(dataset_id)))
+                ).format(t=vs.sql.Identifier(table))
             )
             return list(cur.fetchall())
+
+
+def snapshot_pool(dataset_id: int) -> list[tuple]:
+    """Snapshot the original training pool (legacy in-place helper)."""
+    return _snapshot_pool(dataset_id, "train")
+
+
+def snapshot_test_pool(dataset_id: int) -> list[tuple]:
+    """Snapshot the held-out query pool."""
+    return _snapshot_pool(dataset_id, "test")
 
 
 def restore_pool(dataset_id: int, rows: list[tuple]) -> None:
@@ -309,6 +331,29 @@ def restore_pool(dataset_id: int, rows: list[tuple]) -> None:
     _drop_index(dataset_id)
 
 
+def _choose_subset_ids(rows: list[tuple], max_train_rows: int, seed: int) -> list[int]:
+    """Choose rows for a pool size using exact largest-remainder quotas."""
+    total = len(rows)
+    if total <= max_train_rows:
+        return [int(row["id"]) for row in rows]
+
+    by_label: dict[int, list[int]] = {}
+    for row in rows:
+        by_label.setdefault(int(row["label"]), []).append(int(row["id"]))
+    counts = {label: len(ids) for label, ids in by_label.items()}
+    allocation = vs.largest_remainder_allocation(counts, max_train_rows)
+
+    keep: list[int] = []
+    for label in sorted(by_label):
+        ids = by_label[label]
+        need = allocation[label]
+        if need >= len(ids):
+            keep.extend(ids)
+        elif need > 0:
+            keep.extend(sorted(random.Random(f"{seed}:{label}").sample(ids, need)))
+    return sorted(keep)
+
+
 def subset_dataset(dataset_id: int, max_train_rows: int | None, seed: int) -> int | None:
     """Reduce the training pool to exactly ``max_train_rows`` rows.
 
@@ -327,34 +372,14 @@ def subset_dataset(dataset_id: int, max_train_rows: int | None, seed: int) -> in
         return None
 
     table = vs.train_table(dataset_id)
+    rows = _snapshot_pool(dataset_id, "train")
+    total = len(rows)
+    if total <= max_train_rows:
+        return total
+
+    keep = _choose_subset_ids(rows, max_train_rows, seed)
     with vs.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                vs.sql.SQL("SELECT id, label FROM {t} ORDER BY id").format(
-                    t=vs.sql.Identifier(table)
-                )
-            )
-            rows = [(int(r["id"]), int(r["label"])) for r in cur.fetchall()]
-            total = len(rows)
-            if total <= max_train_rows:
-                return total
-
-            by_label: dict[int, list[int]] = {}
-            for row_id, label in rows:
-                by_label.setdefault(label, []).append(row_id)
-            counts = {label: len(ids) for label, ids in by_label.items()}
-            allocation = vs.largest_remainder_allocation(counts, max_train_rows)
-
-            keep: list[int] = []
-            for label in sorted(by_label):
-                ids = by_label[label]
-                need = allocation[label]
-                if need >= len(ids):
-                    keep.extend(ids)
-                elif need > 0:
-                    keep.extend(sorted(random.Random(f"{seed}:{label}").sample(ids, need)))
-            keep.sort()
-
             cur.execute(
                 vs.sql.SQL("DELETE FROM {t} WHERE NOT (id = ANY(%s))").format(
                     t=vs.sql.Identifier(table)
@@ -379,6 +404,116 @@ def _drop_index(dataset_id: int) -> None:
     execute("DELETE FROM hnsw_indexes WHERE dataset_id = %s", (dataset_id,))
 
 
+def _insert_variant_dataset(
+    parent: dict, state: PreprocessState, name: str, actual_size: int
+) -> int:
+    """Create a new dataset row that owns a size-specific preprocessing state."""
+    with vs.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO datasets
+                    (name, source, original_name, n_rows, n_features, n_classes,
+                     dimension, class_labels, preprocessing, is_seeded,
+                     preprocessing_mode)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+                RETURNING id
+                """,
+                (
+                    name,
+                    "derived",
+                    parent.get("original_name") or parent["name"],
+                    actual_size,
+                    len(state.output_columns),
+                    len(state.class_labels),
+                    state.dimension,
+                    json.dumps(state.class_labels),
+                    state.to_json(),
+                    False,
+                    state.mode,
+                ),
+            )
+            return int(cur.fetchone()["id"])
+
+
+def build_preprocessed_variant(
+    parent_id: int,
+    max_train_rows: int,
+    seed: int,
+) -> dict:
+    """Materialise a pool with preprocessing fitted on that pool alone.
+
+    Existing dataset rows and vector tables are never mutated. The new dataset
+    row owns the fitted state, so `run_experiment` automatically loads the
+    correct preprocessing without any schema change.
+    """
+    parent = fetch_one("SELECT * FROM datasets WHERE id = %s", (parent_id,))
+    if parent is None:
+        raise ValueError(f"Dataset {parent_id} not found")
+
+    base_state = PreprocessState.from_dict(parent["preprocessing"])
+    train_rows = _snapshot_pool(parent_id, "train")
+    test_rows = _snapshot_pool(parent_id, "test")
+    keep_ids = set(_choose_subset_ids(train_rows, max_train_rows, seed))
+    selected_train = [row for row in train_rows if int(row["id"]) in keep_ids]
+
+    raw_train = inverse_transform_vectors(
+        [row["embedding"] for row in selected_train], base_state
+    )
+    raw_train[base_state.target_column] = labels_to_original(
+        [int(row["label"]) for row in selected_train], base_state
+    )
+
+    raw_test = inverse_transform_vectors(
+        [row["embedding"] for row in test_rows], base_state
+    )
+    raw_test[base_state.target_column] = labels_to_original(
+        [int(row["label"]) for row in test_rows], base_state
+    )
+
+    state, preprocessor = fit_preprocessor(
+        raw_train, base_state.target_column, base_state.mode
+    )
+    if state.class_labels != base_state.class_labels:
+        raise ValueError(
+            "The subsampled pool changed the label mapping; refusing to create "
+            "a variant whose encoded labels would differ from the parent dataset."
+        )
+
+    train_matrix, train_labels = transform(raw_train, state, preprocessor)
+    test_matrix, test_labels = transform(raw_test, state, preprocessor)
+
+    name = f"{parent['name']} [pool={len(selected_train)}, seed={seed}]"
+    variant_id = _insert_variant_dataset(parent, state, name, len(selected_train))
+    dimension = int(state.dimension)
+    vs.create_dataset_tables(variant_id, dimension)
+    vs.insert_vectors(
+        variant_id,
+        "train",
+        vector_literal(train_matrix),
+        train_labels,
+        [int(row["row_index"]) for row in selected_train],
+    )
+    vs.insert_vectors(
+        variant_id,
+        "test",
+        vector_literal(test_matrix),
+        test_labels,
+        [int(row["row_index"]) for row in test_rows],
+    )
+
+    return {
+        "dataset_id": variant_id,
+        "parent_dataset_id": parent_id,
+        "target_size": max_train_rows,
+        "actual_size": len(selected_train),
+        "preprocessing_mode": state.mode,
+        "fingerprint": dataset_fingerprint(variant_id),
+        "training_pool_seed": seed,
+        "state_source": "refit_on_variant_training_pool",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Running
 # ---------------------------------------------------------------------------
@@ -400,9 +535,11 @@ def run_one(
     benchmark_round: int,
     benchmark_position: int,
     benchmark_order: str,
+    dataset_id: int | None = None,
+    extra: dict | None = None,
 ) -> dict:
     config = ExperimentConfig(
-        dataset_id=args.dataset_id,
+        dataset_id=args.dataset_id if dataset_id is None else dataset_id,
         k=args.k,
         distance_metric=metric,
         method=method,
@@ -419,6 +556,7 @@ def run_one(
         benchmark_seed=args.order_seed,
         benchmark_order=benchmark_order,
         run_id=args.run_id or None,
+        extra=extra or {},
         name=(
             f"{method} k={args.k} ef={ef_search} size={size_label} "
             f"round={benchmark_round} pos={benchmark_position}"
@@ -494,80 +632,93 @@ def main() -> int:
     )
     print("warm buffer cache; no cold-cache procedure was executed")
 
-    # The dataset is mutated in place when a size sweep is requested, so the
-    # original full-size training pool is snapshotted first and restored at
-    # the end even if a run fails.
-    original_rows: list[tuple] = snapshot_pool(args.dataset_id) if sizes else []
+    # Each requested size owns a derived dataset row with its own fitted
+    # preprocessing state. The original dataset and its vector tables are
+    # never mutated.
+    print("original dataset and vector tables are left unchanged")
 
     rows: list[dict] = []
     experiment_ids: list[int] = []
     query_samples: dict[str, dict] = {}
     benchmark_orders: dict[str, dict] = {}
 
-    try:
-        for size in sizes or [None]:
-            label = "full" if size is None else str(size)
-            actual_size: int | None = None
-            if size is not None:
-                print(f"[size {size}] rebuilding training pool")
-                restore_pool(args.dataset_id, original_rows)
-                actual_size = subset_dataset(args.dataset_id, size, args.seed)
-                print(f"[size {label}] actual training-pool size: {actual_size}")
+    for size in sizes or [None]:
+        label = "full" if size is None else str(size)
+        variant: dict | None = None
+        if size is not None:
+            variant = build_preprocessed_variant(args.dataset_id, size, args.seed)
+            effective_dataset_id = int(variant["dataset_id"])
+            actual_size = int(variant["actual_size"])
+            print(
+                f"[size {label}] derived dataset {effective_dataset_id} "
+                f"with {actual_size} rows and state-specific query vectors"
+            )
+        else:
+            effective_dataset_id = args.dataset_id
+            actual_size = vs.count_vectors(effective_dataset_id, "train")
 
-            # The index is built on the first HNSW run of this size and reused
-            # for every later configuration and round. It is not rebuilt
-            # between ef_search values: only ef_search changes.
-            for round_index, order in enumerate(rounds, start=1):
-                print(f"[size {label}] round {round_index}: {' -> '.join(order)}")
-                order_json = json.dumps(order)
-                round_key = f"{label}:{round_index}"
-                benchmark_orders[round_key] = {
-                    "dataset_id": args.dataset_id,
-                    "train_size_target": size,
-                    "train_size_actual": actual_size,
-                    "benchmark_round": round_index,
-                    "order_seed": args.order_seed,
-                    "training_pool_seed": args.seed,
-                    "query_sample_seed": args.query_sample_seed,
-                    "run_id": args.run_id or None,
-                    "order": list(order),
-                    "experiment_ids": [],
+        extra = {"pool_variant": variant} if variant is not None else {}
+
+        # The index is built on the first HNSW run of this size and reused
+        # for every later configuration and round. It is not rebuilt
+        # between ef_search values: only ef_search changes.
+        for round_index, order in enumerate(rounds, start=1):
+            print(f"[size {label}] round {round_index}: {' -> '.join(order)}")
+            order_json = json.dumps(order)
+            round_key = f"{label}:{round_index}"
+            benchmark_orders[round_key] = {
+                "dataset_id": effective_dataset_id,
+                "parent_dataset_id": args.dataset_id,
+                "train_size_target": size,
+                "train_size_actual": actual_size,
+                "preprocessing_state_source": (
+                    variant["state_source"] if variant is not None else "dataset_row"
+                ),
+                "preprocessing_fingerprint": (
+                    variant["fingerprint"] if variant is not None else None
+                ),
+                "benchmark_round": round_index,
+                "order_seed": args.order_seed,
+                "training_pool_seed": args.seed,
+                "query_sample_seed": args.query_sample_seed,
+                "run_id": args.run_id or None,
+                "order": list(order),
+                "experiment_ids": [],
+            }
+            for position, key in enumerate(order, start=1):
+                method, ef = _parse_key(key)
+                print(f"[size {label}] round {round_index} pos {position}: {method} ef={ef}")
+                result = run_one(
+                    args,
+                    metric,
+                    method,
+                    ef,
+                    label,
+                    round_index,
+                    position,
+                    order_json,
+                    dataset_id=effective_dataset_id,
+                    extra=extra,
+                )
+                experiment_id = int(result["id"])
+                benchmark_orders[round_key]["experiment_ids"].append(experiment_id)
+                flat = flatten(result)
+                experiment_ids.append(experiment_id)
+                rows.append(flat)
+                if method == "hnsw":
+                    print_warning_if_index_unused(flat)
+
+                detail = get_experiment(experiment_id) or {}
+                query_samples[str(experiment_id)] = {
+                    "dataset_id": effective_dataset_id,
+                    "parent_dataset_id": args.dataset_id,
+                    "train_size": flat["train_size"],
+                    "benchmark_round": flat["benchmark_round"],
+                    "benchmark_position": flat["benchmark_position"],
+                    "query_sampling": flat["query_sampling"],
+                    "query_sample_seed": flat["query_sample_seed"],
+                    "query_ids": detail.get("evaluated_query_ids"),
                 }
-                for position, key in enumerate(order, start=1):
-                    method, ef = _parse_key(key)
-                    print(f"[size {label}] round {round_index} pos {position}: {method} ef={ef}")
-                    result = run_one(
-                        args,
-                        metric,
-                        method,
-                        ef,
-                        label,
-                        round_index,
-                        position,
-                        order_json,
-                    )
-                    experiment_id = int(result["id"])
-                    benchmark_orders[round_key]["experiment_ids"].append(experiment_id)
-                    flat = flatten(result)
-                    experiment_ids.append(experiment_id)
-                    rows.append(flat)
-                    if method == "hnsw":
-                        print_warning_if_index_unused(flat)
-
-                    detail = get_experiment(experiment_id) or {}
-                    query_samples[str(experiment_id)] = {
-                        "dataset_id": args.dataset_id,
-                        "train_size": flat["train_size"],
-                        "benchmark_round": flat["benchmark_round"],
-                        "benchmark_position": flat["benchmark_position"],
-                        "query_sampling": flat["query_sampling"],
-                        "query_sample_seed": flat["query_sample_seed"],
-                        "query_ids": detail.get("evaluated_query_ids"),
-                    }
-    finally:
-        if sizes and original_rows:
-            print("restoring original training pool")
-            restore_pool(args.dataset_id, original_rows)
 
     _add_speedups(rows)
     _print_table(rows)

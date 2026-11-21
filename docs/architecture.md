@@ -121,7 +121,9 @@ test pool, which is what the final benchmark used.
 
 Training-pool subsampling uses the same largest-remainder allocator, so the
 resulting table has **exactly** the requested size whenever the pool permits.
-Within each class, kept ids are chosen by
+Each size is materialised as a derived dataset with preprocessing refitted on
+that size's training rows; the original dataset is not mutated. Within each
+class, kept ids are chosen by
 `random.Random(f"{seed}:{label}").sample(ids, n)`. This replaces the earlier
 `SELECT setseed(seed / 10000.0)` call: `setseed` accepts only values in `[-1, 1]`,
 so a seed above 10,000 was out of range. The new mapping accepts any integer

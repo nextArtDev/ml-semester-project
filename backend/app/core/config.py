@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,11 +22,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @field_validator("postgres_password")
+    @classmethod
+    def _password_must_not_be_empty(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value():
+            raise ValueError("POSTGRES_PASSWORD must not be empty")
+        return value
+
     # --- Database -------------------------------------------------------
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_user: str = "postgres"
-    postgres_password: str = "994038"
+    postgres_password: SecretStr = Field(..., description="Database password supplied through POSTGRES_PASSWORD")
     postgres_db: str = "knn_knn_platform"
 
     db_pool_min_size: int = 2
@@ -53,16 +63,18 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        password = quote(self.postgres_password.get_secret_value(), safe="")
         return (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql://{self.postgres_user}:{password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
     @property
     def admin_database_url(self) -> str:
         """Connection to the maintenance DB, used to create the app database."""
+        password = quote(self.postgres_password.get_secret_value(), safe="")
         return (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql://{self.postgres_user}:{password}"
             f"@{self.postgres_host}:{self.postgres_port}/postgres"
         )
 

@@ -81,7 +81,7 @@ def build_cover(doc) -> None:
             ["Frontend", "Next.js 16 · TypeScript · Tailwind v4 · Recharts · next-intl"],
             ["Database", "PostgreSQL 18 · pgvector 0.8.7"],
             ["Audience", "Project author, supervisor, and anyone extending the platform"],
-            ["Companion document", "Thesis-KNN-PostgreSQL-Platform.docx"],
+            ["Companion document", "Thesis-Final-Verified.docx (current v3 thesis)"],
         ],
         widths=[4.0, 11.5],
         font_size=10,

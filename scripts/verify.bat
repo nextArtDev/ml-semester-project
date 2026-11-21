@@ -4,7 +4,10 @@ setlocal
 set PGHOST=localhost
 set PGPORT=5432
 set PGUSER=postgres
-set PGPASSWORD=994038
+if "%PGPASSWORD%"=="" (
+  echo Set PGPASSWORD in the environment before running this script.
+  exit /b 1
+)
 set PGDATABASE=knn_knn_platform
 set PSQL="C:\Program Files\PostgreSQL\18\bin\psql.exe"
 

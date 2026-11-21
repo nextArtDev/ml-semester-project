@@ -104,6 +104,8 @@ cd backend
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 Copy-Item .env.example .env
+# Set POSTGRES_PASSWORD in backend/.env to your local PostgreSQL password.
+# The backend refuses to start if this environment variable is missing or empty.
 .venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -138,6 +140,15 @@ with an RTL-aware Persian layout.
    resulting numeric block. An explicit `standardize_all` mode is available
    for comparison; it is reported separately and is not the primary setup.
 4. Vectors are written to PostgreSQL with `COPY` for throughput.
+
+For a training-size sweep, each requested size is materialised as a derived
+dataset with its own preprocessing state fitted on that size's training rows.
+The held-out queries are transformed with that same state, and the derived
+dataset id and fingerprint are recorded in each experiment's `config` column.
+The original dataset and its vector tables are not modified. This applies to
+numeric/binary datasets such as Covertype; datasets with categorical one-hot
+blocks are rejected for size variants because raw category values are not
+stored and cannot be reconstructed safely.
 
 ### Exact baseline
 
@@ -311,13 +322,19 @@ These figures evaluate the whole held-out pool; they differ from the preserved
 artifacts and must not be mixed with them. The HNSW index is built once per
 pool size and **reused** across all ef values and rounds.
 
-Validate the artifacts with:
+Check artifact integrity with:
 
 ```powershell
 .venv\Scripts\python -m scripts.verify_results `
     --run-id final-v3-full-pool --expected-runs 42 --expected-rounds 3 `
     --expected-queries 3000 --expected-repetitions 3
 ```
+
+This checks artifact structure, counts, seeds, experiment ids, plan flags and
+CSV/JSON/database agreement. It is an **artifact integrity check**, not an
+independent scientific recomputation of recall, accuracy or latency from raw
+per-query evidence. The raw per-query rows remain in the database tables
+`query_latencies` and `experiment_repetitions`.
 
 ### Timing fields
 
@@ -382,22 +399,27 @@ CSV/JSON consistency.
 
 | Document | Contents |
 | --- | --- |
-| [`docs/Thesis-KNN-PostgreSQL-Platform.docx`](docs/Thesis-KNN-PostgreSQL-Platform.docx) | The full thesis — problem statement, related work, methodology, implementation, results and discussion |
+| [`docs/Thesis-Final-Verified.docx`](docs/Thesis-Final-Verified.docx) | **Authoritative current thesis** — aligned with the final v3 benchmark, figures and result artifacts |
+| [`docs/archive/Thesis-KNN-PostgreSQL-Platform.docx`](docs/archive/Thesis-KNN-PostgreSQL-Platform.docx) | Superseded earlier thesis; preserved for history only, do not quote for v3 numbers |
 | [`docs/Project-Guide.docx`](docs/Project-Guide.docx) | The function-by-function tour of the database, the backend and the frontend |
 | [`docs/architecture.md`](docs/architecture.md) | The design decisions and the traps they avoid |
 | [`docs/api.md`](docs/api.md) | The HTTP API reference |
 | [`docs/experiment-plan.md`](docs/experiment-plan.md) | The experimental design and the threats to validity |
 | [`docs/results/README.md`](docs/results/README.md) | The measured results and their interpretation |
 
-Both Word documents are generated from source by the scripts in
-`docs/tools/`, so they can be regenerated whenever the project changes:
+The authoritative thesis and the project guide are generated from source by
+the scripts in `docs/tools/` and can be regenerated whenever the project
+changes:
 
 ```powershell
 cd backend
-.venv\Scripts\python ..\docs\tools\build_thesis.py
+.venv\Scripts\python ..\docs\tools\build_final_thesis.py
 .venv\Scripts\python ..\docs\tools\build_guide.py
 .venv\Scripts\python ..\docs\tools\verify_snippets.py ..\docs\Project-Guide.docx
 ```
+
+`build_thesis.py` is a legacy builder for the archived, superseded thesis and
+must not be used for current benchmark claims.
 
 `verify_snippets.py` checks that every Python and TypeScript listing in the
 documents still matches the source tree, and reports any divergence.

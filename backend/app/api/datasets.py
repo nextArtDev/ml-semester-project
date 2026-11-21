@@ -144,7 +144,7 @@ def list_datasets() -> list[DatasetSummary]:
     rows = fetch_all(
         """
         SELECT id, name, source, n_rows, n_features, n_classes, dimension,
-               class_labels, created_at
+               class_labels, preprocessing_mode, created_at
         FROM datasets ORDER BY created_at DESC
         """
     )
@@ -158,6 +158,7 @@ def list_datasets() -> list[DatasetSummary]:
             n_classes=r["n_classes"],
             dimension=r["dimension"],
             class_labels=r["class_labels"] or [],
+            preprocessing_mode=r["preprocessing_mode"],
             created_at=r["created_at"].isoformat(),
         )
         for r in rows
@@ -169,7 +170,7 @@ def get_dataset(dataset_id: int) -> DatasetSummary:
     row = fetch_one(
         """
         SELECT id, name, source, n_rows, n_features, n_classes, dimension,
-               class_labels, created_at
+               class_labels, preprocessing_mode, created_at
         FROM datasets WHERE id = %s
         """,
         (dataset_id,),
@@ -185,6 +186,7 @@ def get_dataset(dataset_id: int) -> DatasetSummary:
         n_classes=row["n_classes"],
         dimension=row["dimension"],
         class_labels=row["class_labels"] or [],
+        preprocessing_mode=row["preprocessing_mode"],
         created_at=row["created_at"].isoformat(),
     )
 
