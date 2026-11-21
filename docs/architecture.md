@@ -130,6 +130,19 @@ so a seed above 10,000 was out of range. The new mapping accepts any integer
 (0, 42, large positive and negative are all tested), is deterministic for a
 given seed, and different seeds can yield different pools.
 
+Derived-dataset registration, both `CREATE TABLE` statements and both `COPY`
+operations share one borrowed connection with `autocommit=False`; commit occurs
+only after every operation succeeds. PostgreSQL DDL and COPY are transactional,
+so any failure rolls back the dataset row, both tables and all inserted rows
+together.
+
+Each variant is retained as an immutable artifact. There is no automatic reuse
+or deletion. Variant identity is the canonical JSON hash of parent fingerprint,
+selected-id hash and count, seed, preprocessing mode and fitted-state hash;
+target size or seed alone is never sufficient. Exact selected ids are exported
+once via `--variant-ids`; experiment configs and benchmark orders store only
+hashes and counts.
+
 ## Timing decomposition
 
 `run_experiment` measures phases with `time.perf_counter()`. Two retrieval

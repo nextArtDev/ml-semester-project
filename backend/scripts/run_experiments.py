@@ -42,11 +42,16 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.core.database import execute, fetch_one  # noqa: E402
+from app.core.database import execute, fetch_one, transaction  # noqa: E402
 from app.services import vector_store as vs  # noqa: E402
 from app.services.benchmark_order import balanced_rounds  # noqa: E402
 from app.services.classification import repetition_summary  # noqa: E402
 from app.services.dataset_stats import dataset_fingerprint  # noqa: E402
+from app.services.reproducibility import (  # noqa: E402
+    preprocessing_state_hash,
+    selected_ids_provenance,
+    variant_identity_hash,
+)
 from app.services.preprocessing import (  # noqa: E402
     PreprocessState,
     fit_preprocessor,
@@ -273,6 +278,11 @@ def parse_args() -> argparse.Namespace:
         help="JSON output path with the complete order and seed of every round.",
     )
     parser.add_argument(
+        "--variant-ids",
+        default="",
+        help="JSON output path with exact selected ids, stored once per derived variant.",
+    )
+    parser.add_argument(
         "--run-id",
         default="",
         help="Label persisted on every experiment so artifacts can be tied to this run.",
@@ -305,8 +315,8 @@ def snapshot_test_pool(dataset_id: int) -> list[tuple]:
     return _snapshot_pool(dataset_id, "test")
 
 
-def restore_pool(dataset_id: int, rows: list[tuple]) -> None:
-    """Restore the full training pool from a snapshot and drop the index."""
+def legacy_restore_pool(dataset_id: int, rows: list[tuple]) -> None:
+    """Destructively restore a training pool. Use only on disposable datasets."""
     table = vs.train_table(dataset_id)
     with vs.connection() as conn:
         with conn.cursor() as cur:
@@ -329,6 +339,21 @@ def restore_pool(dataset_id: int, rows: list[tuple]) -> None:
                             )
                         )
     _drop_index(dataset_id)
+
+
+def restore_pool(dataset_id: int, rows: list[tuple], *, allow_destructive: bool = False) -> None:
+    """Deprecated wrapper for :func:`legacy_restore_pool`.
+
+    The normal size-sweep path never restores a pool in place. An explicit
+    ``allow_destructive=True`` is required because this function TRUNCATEs a
+    vector table.
+    """
+    if not allow_destructive:
+        raise RuntimeError(
+            "restore_pool is destructive; pass allow_destructive=True only for "
+            "a disposable test dataset."
+        )
+    legacy_restore_pool(dataset_id, rows)
 
 
 def _choose_subset_ids(rows: list[tuple], max_train_rows: int, seed: int) -> list[int]:
@@ -354,7 +379,7 @@ def _choose_subset_ids(rows: list[tuple], max_train_rows: int, seed: int) -> lis
     return sorted(keep)
 
 
-def subset_dataset(dataset_id: int, max_train_rows: int | None, seed: int) -> int | None:
+def legacy_subset_dataset(dataset_id: int, max_train_rows: int | None, seed: int) -> int | None:
     """Reduce the training pool to exactly ``max_train_rows`` rows.
 
     Rows are removed physically so the measured latency reflects the real table
@@ -398,64 +423,129 @@ def subset_dataset(dataset_id: int, max_train_rows: int | None, seed: int) -> in
     return kept
 
 
+def subset_dataset(
+    dataset_id: int,
+    max_train_rows: int | None,
+    seed: int,
+    *,
+    allow_destructive: bool = False,
+) -> int | None:
+    """Deprecated wrapper for :func:`legacy_subset_dataset`.
+
+    The normal size-sweep path never deletes rows from an original pool.
+    """
+    if not allow_destructive:
+        raise RuntimeError(
+            "subset_dataset is destructive; pass allow_destructive=True only "
+            "for a disposable test dataset."
+        )
+    return legacy_subset_dataset(dataset_id, max_train_rows, seed)
+
+
 def _drop_index(dataset_id: int) -> None:
     if vs.hnsw_index_exists(dataset_id):
         vs.drop_hnsw_index(dataset_id)
     execute("DELETE FROM hnsw_indexes WHERE dataset_id = %s", (dataset_id,))
 
 
-def _insert_variant_dataset(
-    parent: dict, state: PreprocessState, name: str, actual_size: int
+def _insert_variant_dataset_row(
+    cur, parent: dict, state: PreprocessState, name: str, actual_size: int
 ) -> int:
-    """Create a new dataset row that owns a size-specific preprocessing state."""
-    with vs.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO datasets
-                    (name, source, original_name, n_rows, n_features, n_classes,
-                     dimension, class_labels, preprocessing, is_seeded,
-                     preprocessing_mode)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
-                RETURNING id
-                """,
-                (
-                    name,
-                    "derived",
-                    parent.get("original_name") or parent["name"],
-                    actual_size,
-                    len(state.output_columns),
-                    len(state.class_labels),
-                    state.dimension,
-                    json.dumps(state.class_labels),
-                    state.to_json(),
-                    False,
-                    state.mode,
-                ),
-            )
-            return int(cur.fetchone()["id"])
+    """Insert the derived dataset row using the caller's transaction cursor."""
+    cur.execute(
+        """
+        INSERT INTO datasets
+            (name, source, original_name, n_rows, n_features, n_classes,
+             dimension, class_labels, preprocessing, is_seeded,
+             preprocessing_mode)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+        RETURNING id
+        """,
+        (
+            name,
+            "derived",
+            parent.get("original_name") or parent["name"],
+            actual_size,
+            len(state.output_columns),
+            len(state.class_labels),
+            state.dimension,
+            json.dumps(state.class_labels),
+            state.to_json(),
+            False,
+            state.mode,
+        ),
+    )
+    return int(cur.fetchone()["id"])
+
+
+def _create_variant_table(cur, dataset_id: int, which: str, dimension: int) -> None:
+    """Create one typed vector table using the caller's transaction cursor."""
+    table = vs.train_table(dataset_id) if which == "train" else vs.test_table(dataset_id)
+    cur.execute(
+        vs.sql.SQL(
+            "CREATE TABLE {t} ("
+            "  id          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,"
+            "  row_index   INTEGER NOT NULL,"
+            "  label       SMALLINT NOT NULL,"
+            "  embedding   vector({dim}) NOT NULL"
+            ")"
+        ).format(t=vs.sql.Identifier(table), dim=vs.sql.Literal(int(dimension)))
+    )
+    cur.execute(
+        vs.sql.SQL("CREATE INDEX {i} ON {t} (row_index)").format(
+            i=vs.sql.Identifier(f"{table}_row_idx"), t=vs.sql.Identifier(table)
+        )
+    )
+
+
+def _create_variant_tables(cur, dataset_id: int, dimension: int) -> None:
+    """Create both variant tables in one transaction."""
+    _create_variant_table(cur, dataset_id, "train", dimension)
+    _create_variant_table(cur, dataset_id, "test", dimension)
+
+
+def _copy_variant_vectors(
+    cur,
+    dataset_id: int,
+    which: str,
+    embeddings,
+    labels,
+    row_indices,
+) -> None:
+    """COPY vectors using the caller's transaction cursor."""
+    table = vs.train_table(dataset_id) if which == "train" else vs.test_table(dataset_id)
+    with cur.copy(
+        vs.sql.SQL("COPY {t} (row_index, label, embedding) FROM STDIN").format(
+            t=vs.sql.Identifier(table)
+        )
+    ) as copy:
+        for embedding, label, row_index in zip(embeddings, labels, row_indices):
+            copy.write_row((int(row_index), int(label), embedding))
 
 
 def build_preprocessed_variant(
     parent_id: int,
     max_train_rows: int,
     seed: int,
-) -> dict:
+) -> tuple[dict, list[int]]:
     """Materialise a pool with preprocessing fitted on that pool alone.
 
-    Existing dataset rows and vector tables are never mutated. The new dataset
-    row owns the fitted state, so `run_experiment` automatically loads the
-    correct preprocessing without any schema change.
+    Registration, table creation and COPY share one real PostgreSQL
+    transaction. Any failure rolls them back together. Exact selected ids are
+    returned separately so callers can export them once without embedding tens
+    of thousands of ids in every experiment configuration.
     """
     parent = fetch_one("SELECT * FROM datasets WHERE id = %s", (parent_id,))
     if parent is None:
         raise ValueError(f"Dataset {parent_id} not found")
 
+    parent_fingerprint = dataset_fingerprint(parent_id)
     base_state = PreprocessState.from_dict(parent["preprocessing"])
     train_rows = _snapshot_pool(parent_id, "train")
     test_rows = _snapshot_pool(parent_id, "test")
-    keep_ids = set(_choose_subset_ids(train_rows, max_train_rows, seed))
-    selected_train = [row for row in train_rows if int(row["id"]) in keep_ids]
+    selected_ids = sorted(_choose_subset_ids(train_rows, max_train_rows, seed))
+    selected_id_set = set(selected_ids)
+    selected_train = [row for row in train_rows if int(row["id"]) in selected_id_set]
 
     raw_train = inverse_transform_vectors(
         [row["embedding"] for row in selected_train], base_state
@@ -479,39 +569,62 @@ def build_preprocessed_variant(
             "The subsampled pool changed the label mapping; refusing to create "
             "a variant whose encoded labels would differ from the parent dataset."
         )
+    if (
+        state.numeric_columns != base_state.numeric_columns
+        or state.binary_columns != base_state.binary_columns
+        or state.categorical_columns != base_state.categorical_columns
+    ):
+        raise ValueError(
+            "Column-type classification changed after subsampling; refusing to "
+            "create a variant with silently different feature geometry."
+        )
 
     train_matrix, train_labels = transform(raw_train, state, preprocessor)
     test_matrix, test_labels = transform(raw_test, state, preprocessor)
 
+    ids_provenance = selected_ids_provenance(selected_ids)
+    state_hash = preprocessing_state_hash(state)
+    identity_input = {
+        "parent_fingerprint": parent_fingerprint,
+        "target_size": max_train_rows,
+        "training_pool_seed": seed,
+        "selected_id_count": ids_provenance["count"],
+        "selected_id_sha256": ids_provenance["sha256"],
+        "preprocessing_mode": state.mode,
+        "preprocessing_state_sha256": state_hash,
+    }
+    identity_hash = variant_identity_hash(identity_input)
     name = f"{parent['name']} [pool={len(selected_train)}, seed={seed}]"
-    variant_id = _insert_variant_dataset(parent, state, name, len(selected_train))
     dimension = int(state.dimension)
-    vs.create_dataset_tables(variant_id, dimension)
-    vs.insert_vectors(
-        variant_id,
-        "train",
-        vector_literal(train_matrix),
-        train_labels,
-        [int(row["row_index"]) for row in selected_train],
-    )
-    vs.insert_vectors(
-        variant_id,
-        "test",
-        vector_literal(test_matrix),
-        test_labels,
-        [int(row["row_index"]) for row in test_rows],
-    )
+    train_vectors = vector_literal(train_matrix)
+    test_vectors = vector_literal(test_matrix)
+    train_row_indices = [int(row["row_index"]) for row in selected_train]
+    test_row_indices = [int(row["row_index"]) for row in test_rows]
 
-    return {
+    with transaction() as conn:
+        with conn.cursor() as cur:
+            variant_id = _insert_variant_dataset_row(
+                cur, parent, state, name, len(selected_train)
+            )
+            _create_variant_tables(cur, variant_id, dimension)
+            _copy_variant_vectors(
+                cur, variant_id, "train", train_vectors, train_labels, train_row_indices
+            )
+            _copy_variant_vectors(
+                cur, variant_id, "test", test_vectors, test_labels, test_row_indices
+            )
+
+    metadata = {
+        **identity_input,
         "dataset_id": variant_id,
         "parent_dataset_id": parent_id,
-        "target_size": max_train_rows,
         "actual_size": len(selected_train),
-        "preprocessing_mode": state.mode,
-        "fingerprint": dataset_fingerprint(variant_id),
-        "training_pool_seed": seed,
+        "variant_identity_sha256": identity_hash,
+        "derived_fingerprint": dataset_fingerprint(variant_id),
         "state_source": "refit_on_variant_training_pool",
+        "variant_policy": "immutable_retained",
     }
+    return metadata, selected_ids
 
 
 # ---------------------------------------------------------------------------
@@ -641,14 +754,24 @@ def main() -> int:
     experiment_ids: list[int] = []
     query_samples: dict[str, dict] = {}
     benchmark_orders: dict[str, dict] = {}
+    variant_artifacts: dict[str, dict] = {}
 
     for size in sizes or [None]:
         label = "full" if size is None else str(size)
-        variant: dict | None = None
+        variant_meta: dict | None = None
         if size is not None:
-            variant = build_preprocessed_variant(args.dataset_id, size, args.seed)
-            effective_dataset_id = int(variant["dataset_id"])
-            actual_size = int(variant["actual_size"])
+            variant_meta, selected_ids = build_preprocessed_variant(
+                args.dataset_id, size, args.seed
+            )
+            effective_dataset_id = int(variant_meta["dataset_id"])
+            actual_size = int(variant_meta["actual_size"])
+            variant_artifacts[str(effective_dataset_id)] = {
+                **variant_meta,
+                "selected_ids": selected_ids,
+                "selected_ids_canonical": (
+                    "sorted integer ids; SHA-256 over canonical JSON array"
+                ),
+            }
             print(
                 f"[size {label}] derived dataset {effective_dataset_id} "
                 f"with {actual_size} rows and state-specific query vectors"
@@ -657,7 +780,7 @@ def main() -> int:
             effective_dataset_id = args.dataset_id
             actual_size = vs.count_vectors(effective_dataset_id, "train")
 
-        extra = {"pool_variant": variant} if variant is not None else {}
+        extra = {"pool_variant": variant_meta} if variant_meta is not None else {}
 
         # The index is built on the first HNSW run of this size and reused
         # for every later configuration and round. It is not rebuilt
@@ -672,10 +795,39 @@ def main() -> int:
                 "train_size_target": size,
                 "train_size_actual": actual_size,
                 "preprocessing_state_source": (
-                    variant["state_source"] if variant is not None else "dataset_row"
+                    variant_meta["state_source"]
+                    if variant_meta is not None
+                    else "dataset_row"
                 ),
-                "preprocessing_fingerprint": (
-                    variant["fingerprint"] if variant is not None else None
+                "parent_fingerprint": (
+                    variant_meta["parent_fingerprint"]
+                    if variant_meta is not None
+                    else None
+                ),
+                "derived_fingerprint": (
+                    variant_meta["derived_fingerprint"]
+                    if variant_meta is not None
+                    else None
+                ),
+                "selected_id_count": (
+                    variant_meta["selected_id_count"]
+                    if variant_meta is not None
+                    else None
+                ),
+                "selected_id_sha256": (
+                    variant_meta["selected_id_sha256"]
+                    if variant_meta is not None
+                    else None
+                ),
+                "preprocessing_state_sha256": (
+                    variant_meta["preprocessing_state_sha256"]
+                    if variant_meta is not None
+                    else None
+                ),
+                "variant_identity_sha256": (
+                    variant_meta["variant_identity_sha256"]
+                    if variant_meta is not None
+                    else None
                 ),
                 "benchmark_round": round_index,
                 "order_seed": args.order_seed,
@@ -747,6 +899,22 @@ def main() -> int:
             json.dumps(benchmark_orders, indent=2), encoding="utf-8"
         )
         print(f"Benchmark orders written to {args.benchmark_orders}")
+    if args.variant_ids:
+        Path(args.variant_ids).write_text(
+            json.dumps(
+                {
+                    "algorithm": {
+                        "canonical_json": "sort_keys=True, separators=(',', ':'), ensure_ascii=False",
+                        "selected_ids": "sorted ascending integer database ids",
+                        "hash": "sha256 hex over UTF-8 canonical JSON",
+                    },
+                    "variants": variant_artifacts,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"Variant ids written to {args.variant_ids}")
 
     return 0
 

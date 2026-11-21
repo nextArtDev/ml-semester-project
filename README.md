@@ -111,6 +111,15 @@ Copy-Item .env.example .env
 
 Interactive API docs: <http://127.0.0.1:8000/docs>
 
+`POSTGRES_PASSWORD` is read by the backend from `backend/.env` (or the process
+environment). `scripts/verify.bat` is a separate Windows shell script and reads
+`PGPASSWORD` from the parent shell instead; set that variable in your terminal
+before running it. Do not place either value in tracked files.
+
+A password from an earlier version of this project is still present in Git
+history. The password must be rotated in PostgreSQL outside this repository;
+historical commits are intentionally not rewritten.
+
 ### 3. Frontend
 
 ```powershell
@@ -143,12 +152,29 @@ with an RTL-aware Persian layout.
 
 For a training-size sweep, each requested size is materialised as a derived
 dataset with its own preprocessing state fitted on that size's training rows.
-The held-out queries are transformed with that same state, and the derived
-dataset id and fingerprint are recorded in each experiment's `config` column.
-The original dataset and its vector tables are not modified. This applies to
-numeric/binary datasets such as Covertype; datasets with categorical one-hot
-blocks are rejected for size variants because raw category values are not
-stored and cannot be reconstructed safely.
+Registration, table creation and both COPY operations share one PostgreSQL
+transaction, so a failed creation leaves no derived dataset or vector table.
+The held-out queries are transformed with that same state. The original dataset
+and its vector tables are not modified. This applies to numeric/binary datasets
+such as Covertype; datasets with categorical one-hot blocks are rejected for
+size variants because raw category values are not stored and cannot be
+reconstructed safely. If a small sample changes a known continuous column's
+type classification, variant creation also stops instead of silently changing
+the feature geometry.
+
+Derived variants are **immutable retained artifacts**. A new benchmark run
+creates new derived dataset rows; nothing is deleted or deduplicated
+automatically. Plan for database growth: each size adds one dataset row and two
+vector tables, plus any experiments that consume them.
+
+Provenance is compact. Every experiment's `config.extra.pool_variant` and every
+`benchmark_orders.json` entry record the parent fingerprint, selected-ID count
+and SHA-256, preprocessing-state SHA-256, variant identity hash, both dataset
+ids and both fingerprints. Exact selected ids are exported once per variant
+with `--variant-ids <path>`. Hashes use SHA-256 over canonical JSON
+(`sort_keys=True`, separators `,` and `:`, UTF-8, non-ASCII preserved); selected
+ids are sorted ascending before hashing. To verify an artifact, recompute the
+hash from its id array and compare it with `selected_id_sha256`.
 
 ### Exact baseline
 
@@ -293,7 +319,8 @@ cd backend
     --repetition-details ..\docs\results\repetition_details.csv `
     --repetition-summary ..\docs\results\repetition_summary.csv `
     --query-samples ..\docs\results\query_samples.json `
-    --benchmark-orders ..\docs\results\benchmark_orders.json
+    --benchmark-orders ..\docs\results\benchmark_orders.json `
+    --variant-ids ..\docs\results\variant_ids.json
 ```
 
 Aggregated over the three rounds, the measured output on dataset 116 with all

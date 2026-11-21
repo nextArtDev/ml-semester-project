@@ -453,6 +453,34 @@ def fit_preprocessor(
     return state, preprocessor
 
 
+def preprocessor_from_state(state: PreprocessState) -> Preprocessor:
+    """Rebuild an applying-only :class:`Preprocessor` from a fitted state.
+
+    The fitted parameters are copied into ``StandardScaler`` instances. This
+    is useful for verifying that a stored preprocessing state reproduces the
+    stored vectors without refitting on any data.
+    """
+    def scaler_from(mean: list[float], scale: list[float]) -> StandardScaler | None:
+        if not mean or not scale:
+            return None
+        scaler = StandardScaler()
+        scaler.mean_ = np.asarray(mean, dtype=np.float64)
+        scaler.scale_ = np.asarray(scale, dtype=np.float64)
+        scaler.var_ = scaler.scale_ ** 2
+        scaler.n_features_in_ = len(scaler.mean_)
+        return scaler
+
+    return Preprocessor(
+        state=state,
+        numeric_scaler=scaler_from(
+            state.numeric_scaler_mean, state.numeric_scaler_scale
+        ),
+        binary_scaler=scaler_from(
+            state.binary_scaler_mean, state.binary_scaler_scale
+        ),
+    )
+
+
 def transform(
     df: pd.DataFrame,
     state: PreprocessState,

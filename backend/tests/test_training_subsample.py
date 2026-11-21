@@ -90,7 +90,7 @@ def _train_ids(dataset_id: int) -> list[int]:
 class TestSampleSizeAllocation:
     @pytest.mark.parametrize("target", [250, 333, 777, 999])
     def test_target_is_met_exactly(self, imbalanced_dataset: int, target: int) -> None:
-        actual = runner.subset_dataset(imbalanced_dataset, target, seed=0)
+        actual = runner.subset_dataset(imbalanced_dataset, target, seed=0, allow_destructive=True)
         assert actual == target
         assert len(_train_ids(imbalanced_dataset)) == target
 
@@ -98,7 +98,7 @@ class TestSampleSizeAllocation:
     def test_rare_classes_are_kept_when_possible(
         self, imbalanced_dataset: int, target: int
     ) -> None:
-        runner.subset_dataset(imbalanced_dataset, target, seed=42)
+        runner.subset_dataset(imbalanced_dataset, target, seed=42, allow_destructive=True)
         counts = vs.label_counts(imbalanced_dataset, "train")
         assert set(counts) == {0, 1, 2, 3}
         assert sum(counts.values()) == target
@@ -114,14 +114,14 @@ class TestSampleSizeAllocation:
 class TestSeedHandling:
     @pytest.mark.parametrize("seed", [0, 42, 10**9, -7])
     def test_any_integer_seed_is_accepted(self, imbalanced_dataset: int, seed: int) -> None:
-        actual = runner.subset_dataset(imbalanced_dataset, 250, seed=seed)
+        actual = runner.subset_dataset(imbalanced_dataset, 250, seed=seed, allow_destructive=True)
         assert actual == 250
 
     @pytest.mark.parametrize("seed", [0, 42, 10**9, -7])
     def test_same_seed_reproduces_the_same_pool(
         self, imbalanced_dataset: int, seed: int
     ) -> None:
-        runner.subset_dataset(imbalanced_dataset, 250, seed=seed)
+        runner.subset_dataset(imbalanced_dataset, 250, seed=seed, allow_destructive=True)
         first = set(_train_ids(imbalanced_dataset))
 
         # Restore by resetting the table from a fresh dataset is expensive;
@@ -148,13 +148,13 @@ class TestSeedHandling:
                     for index, (vector, label) in enumerate(zip(vectors, labels)):
                         copy.write_row((index + 1, index, label, vector))
 
-        runner.subset_dataset(imbalanced_dataset, 250, seed=seed)
+        runner.subset_dataset(imbalanced_dataset, 250, seed=seed, allow_destructive=True)
         assert set(_train_ids(imbalanced_dataset)) == first
 
     def test_different_seeds_can_produce_different_pools(
         self, imbalanced_dataset: int
     ) -> None:
-        runner.subset_dataset(imbalanced_dataset, 250, seed=0)
+        runner.subset_dataset(imbalanced_dataset, 250, seed=0, allow_destructive=True)
         first = set(_train_ids(imbalanced_dataset))
 
         with connection() as conn:
@@ -177,5 +177,5 @@ class TestSeedHandling:
                     for index, (vector, label) in enumerate(zip(vectors, labels)):
                         copy.write_row((index + 1, index, label, vector))
 
-        runner.subset_dataset(imbalanced_dataset, 250, seed=1)
+        runner.subset_dataset(imbalanced_dataset, 250, seed=1, allow_destructive=True)
         assert set(_train_ids(imbalanced_dataset)) != first

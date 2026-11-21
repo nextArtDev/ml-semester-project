@@ -40,6 +40,34 @@ def connection() -> Iterator[psycopg.Connection]:
         yield conn
 
 
+@contextmanager
+def transaction() -> Iterator[psycopg.Connection]:
+    """Yield one pooled connection inside a real PostgreSQL transaction.
+
+    The pool is configured with ``autocommit=True``. This helper temporarily
+    switches the borrowed connection to autocommit off, so every cursor created
+    from that same connection participates in one transaction. PostgreSQL DDL
+    and COPY are transactional; commit happens only after the body succeeds.
+
+    The original autocommit setting is restored in ``finally`` so the pooled
+    connection is returned in its expected state.
+    """
+    with connection() as conn:
+        previous_autocommit = conn.autocommit
+        conn.autocommit = False
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                logger.exception("Transaction rollback failed")
+            raise
+        finally:
+            conn.autocommit = previous_autocommit
+
+
 def fetch_all(sql: str, params: tuple | dict | None = None) -> list[dict]:
     with connection() as conn:
         with conn.cursor() as cur:

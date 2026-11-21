@@ -14,6 +14,12 @@ from app.services.preprocessing import (
     transform,
     vector_literal,
 )
+from app.services.reproducibility import (
+    canonical_json,
+    preprocessing_state_hash,
+    selected_ids_provenance,
+    variant_identity_hash,
+)
 from scripts import run_experiments as runner
 
 
@@ -75,3 +81,48 @@ def test_choose_subset_ids_is_exact_and_reproducible() -> None:
     assert len(first) == 37
     assert len(set(first)) == 37
     assert first == second
+
+
+def test_provenance_hashes_are_deterministic_and_order_independent() -> None:
+    first = selected_ids_provenance([9, 2, 7])
+    second = selected_ids_provenance([7, 9, 2])
+
+    assert first == second
+    assert first["count"] == 3
+    assert len(first["sha256"]) == 64
+    assert canonical_json({"b": 1, "a": 2}) == '{"a":2,"b":1}'
+
+
+def test_state_hash_tracks_fitted_state() -> None:
+    raw = _numeric_binary_frame()
+    state, _ = fit_preprocessor(raw, "label", PreprocessingMode.COVERTYPE)
+
+    changed = fit_preprocessor(
+        raw.assign(elevation=raw["elevation"] + 10),
+        "label",
+        PreprocessingMode.COVERTYPE,
+    )[0]
+
+    assert preprocessing_state_hash(state) != preprocessing_state_hash(changed)
+
+
+def test_variant_identity_includes_parent_fingerprint() -> None:
+    base = {
+        "parent_fingerprint": "a" * 32,
+        "target_size": 100,
+        "training_pool_seed": 0,
+        "selected_id_count": 100,
+        "selected_id_sha256": "b" * 64,
+        "preprocessing_mode": "covertype",
+        "preprocessing_state_sha256": "c" * 64,
+    }
+    other = {**base, "parent_fingerprint": "d" * 32}
+
+    assert variant_identity_hash(base) != variant_identity_hash(other)
+
+
+def test_legacy_helpers_require_explicit_destructive_flag() -> None:
+    with pytest.raises(RuntimeError, match="allow_destructive"):
+        runner.subset_dataset(1, 10, 0)
+    with pytest.raises(RuntimeError, match="allow_destructive"):
+        runner.restore_pool(1, [])
