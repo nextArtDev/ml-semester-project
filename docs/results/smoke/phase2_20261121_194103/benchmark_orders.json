@@ -1,0 +1,30 @@
+{
+  "1000:1": {
+    "dataset_id": 846,
+    "parent_dataset_id": 116,
+    "train_size_target": 1000,
+    "train_size_actual": 1000,
+    "preprocessing_state_source": "refit_on_variant_training_pool",
+    "parent_fingerprint": "6baa8fa283ea5a8267d3e964eedf5d2a",
+    "derived_fingerprint": "0479a02aac71917bfeb570187cf2fc4d",
+    "selected_id_count": 1000,
+    "selected_id_sha256": "dd3f86a18421df59b1089bcb6cb4fbb2cdebaf22ccab6536b51fd73d627eae82",
+    "preprocessing_state_sha256": "c74635e2b97f55afe503f030d03cb094e38b7d6531b2de8cdfd9cf1c94d13c88",
+    "variant_identity_sha256": "f70ca7bf6ea849621f945e4b81f78831c4e76c7997456b2be34d5361c7ff72d6",
+    "benchmark_round": 1,
+    "order_seed": 0,
+    "training_pool_seed": 0,
+    "query_sample_seed": 0,
+    "run_id": "smoke-phase2-20261121_194103",
+    "order": [
+      "exact:-",
+      "hnsw:50",
+      "hnsw:10"
+    ],
+    "experiment_ids": [
+      382,
+      383,
+      384
+    ]
+  }
+}
