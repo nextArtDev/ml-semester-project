@@ -1,0 +1,17 @@
+{
+  "natural_run_id": "phase3-natural-v1-20261123T224455",
+  "controlled_run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+  "natural_experiments": 30,
+  "controlled_experiments": 8,
+  "failed_natural_experiments": [
+    388,
+    392,
+    396
+  ],
+  "latency_rows": 342000,
+  "repetition_rows": 114,
+  "datasets_after": 8,
+  "experiments_after": 240,
+  "parent_fingerprint": "6baa8fa283ea5a8267d3e964eedf5d2a",
+  "errors": []
+}

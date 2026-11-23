@@ -1,0 +1,190 @@
+{
+  "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+  "mode": "controlled_hnsw",
+  "experiments": [
+    {
+      "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+      "target_size": 10000,
+      "dataset_id": 847,
+      "ef_search": 10,
+      "experiment_id": 415,
+      "status": "completed",
+      "used_index_scan": true,
+      "used_sequential_scan": false,
+      "applied_ef_search": 10,
+      "planner_mode": "controlled_hnsw",
+      "planner_settings": {
+        "enable_seqscan": "off",
+        "hnsw.ef_search": "10"
+      },
+      "valid_for_summary": true,
+      "error_message": null,
+      "latency_p50_ms": 0.2822999995260034,
+      "latency_p95_ms": 0.38419999882535194,
+      "recall_at_k": 0.9949333333333334,
+      "accuracy": 0.7536666666666667,
+      "macro_f1": 0.5587532767670413
+    },
+    {
+      "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+      "target_size": 10000,
+      "dataset_id": 847,
+      "ef_search": 50,
+      "experiment_id": 416,
+      "status": "completed",
+      "used_index_scan": true,
+      "used_sequential_scan": false,
+      "applied_ef_search": 50,
+      "planner_mode": "controlled_hnsw",
+      "planner_settings": {
+        "enable_seqscan": "off",
+        "hnsw.ef_search": "50"
+      },
+      "valid_for_summary": true,
+      "error_message": null,
+      "latency_p50_ms": 0.3973000002588378,
+      "latency_p95_ms": 0.5401049998909001,
+      "recall_at_k": 0.9997999999999999,
+      "accuracy": 0.755,
+      "macro_f1": 0.5606453143206537
+    },
+    {
+      "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+      "target_size": 10000,
+      "dataset_id": 847,
+      "ef_search": 100,
+      "experiment_id": 417,
+      "status": "completed",
+      "used_index_scan": true,
+      "used_sequential_scan": false,
+      "applied_ef_search": 100,
+      "planner_mode": "controlled_hnsw",
+      "planner_settings": {
+        "enable_seqscan": "off",
+        "hnsw.ef_search": "100"
+      },
+      "valid_for_summary": true,
+      "error_message": null,
+      "latency_p50_ms": 0.4986499998267391,
+      "latency_p95_ms": 0.6699050004499439,
+      "recall_at_k": 0.9999333333333333,
+      "accuracy": 0.7546666666666667,
+      "macro_f1": 0.5605248720011566
+    },
+    {
+      "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+      "target_size": 10000,
+      "dataset_id": 847,
+      "ef_search": 400,
+      "experiment_id": 418,
+      "status": "completed",
+      "used_index_scan": true,
+      "used_sequential_scan": false,
+      "applied_ef_search": 400,
+      "planner_mode": "controlled_hnsw",
+      "planner_settings": {
+        "enable_seqscan": "off",
+        "hnsw.ef_search": "400"
+      },
+      "valid_for_summary": true,
+      "error_message": null,
+      "latency_p50_ms": 1.1041999996450613,
+      "latency_p95_ms": 1.4447399994423897,
+      "recall_at_k": 0.9999333333333333,
+      "accuracy": 0.7546666666666667,
+      "macro_f1": 0.5605248720011566
+    },
+    {
+      "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+      "target_size": 50000,
+      "dataset_id": 848,
+      "ef_search": 10,
+      "experiment_id": 419,
+      "status": "completed",
+      "used_index_scan": true,
+      "used_sequential_scan": false,
+      "applied_ef_search": 10,
+      "planner_mode": "controlled_hnsw",
+      "planner_settings": {
+        "enable_seqscan": "off",
+        "hnsw.ef_search": "10"
+      },
+      "valid_for_summary": true,
+      "error_message": null,
+      "latency_p50_ms": 0.28810000003431924,
+      "latency_p95_ms": 0.38020499923732126,
+      "recall_at_k": 0.9829333333333334,
+      "accuracy": 0.842,
+      "macro_f1": 0.7459811253295009
+    },
+    {
+      "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+      "target_size": 50000,
+      "dataset_id": 848,
+      "ef_search": 50,
+      "experiment_id": 420,
+      "status": "completed",
+      "used_index_scan": true,
+      "used_sequential_scan": false,
+      "applied_ef_search": 50,
+      "planner_mode": "controlled_hnsw",
+      "planner_settings": {
+        "enable_seqscan": "off",
+        "hnsw.ef_search": "50"
+      },
+      "valid_for_summary": true,
+      "error_message": null,
+      "latency_p50_ms": 0.41680000140331686,
+      "latency_p95_ms": 0.5611049997241934,
+      "recall_at_k": 0.9974666666666665,
+      "accuracy": 0.8433333333333334,
+      "macro_f1": 0.7498117314590004
+    },
+    {
+      "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+      "target_size": 50000,
+      "dataset_id": 848,
+      "ef_search": 100,
+      "experiment_id": 421,
+      "status": "completed",
+      "used_index_scan": true,
+      "used_sequential_scan": false,
+      "applied_ef_search": 100,
+      "planner_mode": "controlled_hnsw",
+      "planner_settings": {
+        "enable_seqscan": "off",
+        "hnsw.ef_search": "100"
+      },
+      "valid_for_summary": true,
+      "error_message": null,
+      "latency_p50_ms": 0.5903999999645748,
+      "latency_p95_ms": 0.8933150007578659,
+      "recall_at_k": 0.9987999999999998,
+      "accuracy": 0.8436666666666667,
+      "macro_f1": 0.7499216809106511
+    },
+    {
+      "run_id": "phase3-controlled-diagnostic-v1-20261123T224455",
+      "target_size": 50000,
+      "dataset_id": 848,
+      "ef_search": 400,
+      "experiment_id": 422,
+      "status": "completed",
+      "used_index_scan": true,
+      "used_sequential_scan": false,
+      "applied_ef_search": 400,
+      "planner_mode": "controlled_hnsw",
+      "planner_settings": {
+        "enable_seqscan": "off",
+        "hnsw.ef_search": "400"
+      },
+      "valid_for_summary": true,
+      "error_message": null,
+      "latency_p50_ms": 1.41549999898416,
+      "latency_p95_ms": 2.181800000471412,
+      "recall_at_k": 0.9996,
+      "accuracy": 0.844,
+      "macro_f1": 0.7500316457154236
+    }
+  ]
+}
