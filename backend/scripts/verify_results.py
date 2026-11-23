@@ -104,6 +104,10 @@ def main() -> int:
 
     for row, json_row in zip(rows, json_rows):
         for key in FIELDS:
+            # Older archived artifacts predate Phase 2 columns; never rewrite
+            # them, and only compare fields that both artifacts actually carry.
+            if key not in row or key not in json_row:
+                continue
             expected = "" if json_row[key] is None else str(json_row[key])
             check(str(row[key]) == expected, f"CSV/JSON mismatch: {key} for {row['experiment_id']}")
         record = db_by_id.get(int(row["experiment_id"]))
@@ -119,8 +123,13 @@ def main() -> int:
 
         environment = _as_object(record["environment"]) or {}
         if row["retrieval_method"] == "hnsw":
+            check(record["status"] == "completed",
+                  f"HNSW row {row['experiment_id']} is not a completed valid run")
             check(record["used_index_scan"] is True,
                   f"HNSW row {row['experiment_id']} did not use the index")
+            if "planner_mode" in row:
+                check(row["planner_mode"] in ("natural", "controlled_hnsw"),
+                      f"unknown planner mode for {row['experiment_id']}")
             check(row["hnsw_m"] not in ("", "None"), f"missing hnsw_m for {row['experiment_id']}")
             check(row["hnsw_ef_construction"] not in ("", "None"),
                   f"missing hnsw_ef_construction for {row['experiment_id']}")

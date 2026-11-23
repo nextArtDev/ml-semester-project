@@ -76,6 +76,9 @@ FIELDS = [
     "unique_queries",
     "total_test_pool",
     "retrieval_method",
+    "planner_mode",
+    "status",
+    "valid_for_summary",
     "k",
     "distance_metric",
     "hnsw_ef_search",
@@ -147,6 +150,7 @@ REPETITION_FIELDS = [
     "dataset_id",
     "train_size",
     "retrieval_method",
+    "planner_mode",
     "ef_search",
     "repetition",
     "unique_queries",
@@ -168,6 +172,7 @@ SUMMARY_FIELDS = [
     "dataset_id",
     "train_size",
     "retrieval_method",
+    "planner_mode",
     "ef_search",
     "repetitions",
     "metric",
@@ -208,6 +213,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--metric", choices=["l2", "cosine", "l1"], default="l2")
+    parser.add_argument(
+        "--planner-mode",
+        choices=list(vs.PLANNER_MODES),
+        default="natural",
+        help="Natural planner behavior (default) or opt-in controlled HNSW mode. "
+        "Results from different modes must never be pooled.",
+    )
     parser.add_argument(
         "--max-queries",
         type=int,
@@ -657,6 +669,7 @@ def run_one(
         distance_metric=metric,
         method=method,
         ef_search=ef_search,
+        planner_mode=getattr(args, "planner_mode", "natural"),
         hnsw_m=args.hnsw_m,
         hnsw_ef_construction=args.hnsw_ef_construction,
         max_queries=args.max_queries if args.max_queries > 0 else None,
@@ -671,8 +684,9 @@ def run_one(
         run_id=args.run_id or None,
         extra=extra or {},
         name=(
-            f"{method} k={args.k} ef={ef_search} size={size_label} "
-            f"round={benchmark_round} pos={benchmark_position}"
+            f"{method} mode={getattr(args, 'planner_mode', 'natural')} "
+            f"k={args.k} ef={ef_search} "
+            f"size={size_label} round={benchmark_round} pos={benchmark_position}"
         ),
     )
     return run_experiment(config)
@@ -691,6 +705,12 @@ def flatten(result: dict) -> dict:
     row["preprocessing_mode"] = environment.get("preprocessing_mode")
     row["used_sequential_scan"] = environment.get("used_sequential_scan")
     row["applied_ef_search"] = environment.get("applied_ef_search")
+    config = detail.get("config") or {}
+    if isinstance(config, str):
+        config = json.loads(config)
+    row["planner_mode"] = config.get("planner_mode") or environment.get("planner_mode") or "natural"
+    row["status"] = result.get("status")
+    row["valid_for_summary"] = environment.get("valid_for_summary")
     for column, key in ENV_KEYS.items():
         row[column] = environment.get(key)
     return row
@@ -700,9 +720,11 @@ def print_warning_if_index_unused(row: dict) -> None:
     if row["retrieval_method"] == "hnsw" and not row["used_index_scan"]:
         print(
             "  WARNING: HNSW run did not use the index "
-            f"(sequential_scan={row['used_sequential_scan']}, "
+            f"(status={row['status']}, mode={row['planner_mode']}, "
+            f"sequential_scan={row['used_sequential_scan']}, "
             f"applied_ef_search={row['applied_ef_search']}). "
-            "The latency belongs to an exhaustive scan, not to HNSW.",
+            "The latency belongs to an exhaustive scan, not to HNSW; "
+            "the run is excluded from valid summaries.",
             file=sys.stderr,
         )
 
@@ -930,6 +952,8 @@ def _add_speedups(rows: list[dict]) -> None:
     for row in rows:
         if row["retrieval_method"] != "exact":
             continue
+        if row.get("status") != "completed" or row.get("valid_for_summary") is False:
+            continue
         size = row["train_size"]
         bucket = baselines.setdefault(size, {"p50": [], "avg": []})
         for key, source in (("p50", "latency_p50_ms"), ("avg", "latency_avg_ms")):
@@ -939,6 +963,12 @@ def _add_speedups(rows: list[dict]) -> None:
 
     for row in rows:
         if row["retrieval_method"] != "hnsw":
+            continue
+        # Controlled HNSW runs are a separate result category from the natural
+        # exact baseline; never mix their latencies into one speed-up.
+        if row.get("planner_mode") != "natural":
+            continue
+        if row.get("status") != "completed" or row.get("valid_for_summary") is False:
             continue
         bucket = baselines.get(row["train_size"])
         if not bucket:
@@ -960,9 +990,9 @@ def _ratio(baseline: float | None, measured: float | None) -> float | None:
 
 def _print_table(rows: list[dict]) -> None:
     header = (
-        f"{'size':>8} {'method':>8} {'k':>3} {'ef':>5} {'reps':>4} "
+        f"{'size':>8} {'method':>8} {'mode':>15} {'k':>3} {'ef':>5} {'reps':>4} "
         f"{'recall':>8} {'acc':>8} {'macroF1':>8} "
-        f"{'p50ms':>9} {'p99ms':>9} {'buildms':>9} {'idx':>5} {'x':>7}"
+        f"{'p50ms':>9} {'p99ms':>9} {'buildms':>9} {'idx':>5} {'status':>9} {'x':>7}"
     )
     print()
     print(header)
@@ -974,6 +1004,7 @@ def _print_table(rows: list[dict]) -> None:
 
         print(
             f"{str(row['train_size']):>8} {row['retrieval_method']:>8} "
+            f"{str(row['planner_mode']):>15} "
             f"{row['k']:>3} {str(row['hnsw_ef_search'] or '-'):>5} "
             f"{row['repetitions']:>4} "
             f"{fmt(row['recall_at_k']):>8} {fmt(row['accuracy']):>8} "
@@ -982,6 +1013,7 @@ def _print_table(rows: list[dict]) -> None:
             f"{fmt(row['latency_p99_ms'], 3):>9} "
             f"{fmt(row['index_build_ms'], 1):>9} "
             f"{str(row['used_index_scan']):>5} "
+            f"{str(row['status']):>9} "
             f"{fmt(row['speedup_p50'], 1):>7}"
         )
 
@@ -1009,6 +1041,9 @@ def _write_repetition_details(experiment_ids: list[int], path: str) -> None:
                     "dataset_id": experiment.get("dataset_id"),
                     "train_size": experiment.get("train_size"),
                     "retrieval_method": experiment.get("retrieval_method"),
+                    "planner_mode": (experiment.get("config") or {}).get(
+                        "planner_mode", "natural"
+                    ),
                     "ef_search": experiment.get("hnsw_ef_search"),
                     "repetition": rep["repetition"],
                     "unique_queries": rep["unique_queries"],
@@ -1062,6 +1097,9 @@ def _write_repetition_summary(experiment_ids: list[int], path: str) -> None:
                     "dataset_id": experiment.get("dataset_id"),
                     "train_size": experiment.get("train_size"),
                     "retrieval_method": experiment.get("retrieval_method"),
+                    "planner_mode": (experiment.get("config") or {}).get(
+                        "planner_mode", "natural"
+                    ),
                     "ef_search": experiment.get("hnsw_ef_search"),
                     "repetitions": len(reps),
                     "metric": output_name,

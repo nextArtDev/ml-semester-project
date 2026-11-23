@@ -37,6 +37,7 @@ def run(request: ExperimentRequest) -> dict:
         distance_metric=DistanceMetric(request.distance_metric),
         method=request.method,
         ef_search=request.ef_search,
+        planner_mode=request.planner_mode,
         hnsw_m=request.hnsw_m,
         hnsw_ef_construction=request.hnsw_ef_construction,
         max_queries=request.max_queries,

@@ -27,15 +27,28 @@ import json
 import logging
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 from psycopg import sql
+from psycopg.errors import UndefinedObject
 
 from app.core.database import connection
 from app.services.metrics import DistanceMetric
 
 logger = logging.getLogger(__name__)
+
+# Natural planner mode is the default and is the only mode used by the
+# original benchmark. Controlled HNSW mode is opt-in and encourages the index
+# with transaction-local planner settings; results must never be pooled with
+# natural-mode results.
+PLANNER_MODES = ("natural", "controlled_hnsw")
+
+_EXPECTED_OPCLASS = {
+    DistanceMetric.L2: "vector_l2_ops",
+    DistanceMetric.COSINE: "vector_cosine_ops",
+    DistanceMetric.L1: "vector_l1_ops",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +354,7 @@ def ensure_hnsw_index(
         and int(existing["m"]) == int(m)
         and int(existing["ef_construction"]) == int(ef_construction)
         and hnsw_index_exists(dataset_id)
+        and _catalog_index_is_usable(dataset_id, metric)
     ):
         logger.info("Reusing existing HNSW index for dataset %s", dataset_id)
         return IndexInfo(
@@ -466,6 +480,114 @@ def hnsw_index_exists(dataset_id: int) -> bool:
             return cur.fetchone() is not None
 
 
+@dataclass(frozen=True)
+class IndexVerification:
+    """Catalog facts checked before an HNSW query is allowed to run."""
+
+    index_name: str
+    access_method: str
+    operator_class: str
+    table_name: str
+    is_valid: bool
+    is_ready: bool
+    is_live: bool
+    reltuples: int | None
+    relpages: int | None
+    size_bytes: int | None
+    column_expression: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "index_name": self.index_name,
+            "access_method": self.access_method,
+            "operator_class": self.operator_class,
+            "table_name": self.table_name,
+            "is_valid": self.is_valid,
+            "is_ready": self.is_ready,
+            "is_live": self.is_live,
+            "reltuples": self.reltuples,
+            "relpages": self.relpages,
+            "size_bytes": self.size_bytes,
+            "column_expression": self.column_expression,
+        }
+
+
+def verify_hnsw_index(dataset_id: int, metric: DistanceMetric) -> IndexVerification:
+    """Verify that the named index is a usable HNSW index for ``metric``.
+
+    A registry row alone is not evidence: the physical index may have been
+    dropped, invalidated, or built for a different distance operator class.
+    """
+    expected_name = index_name(dataset_id)
+    expected_table = train_table(dataset_id)
+    expected_opclass = _EXPECTED_OPCLASS[metric]
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.relname AS index_name, "
+                "       i.tablename AS table_name, "
+                "       am.amname AS access_method, "
+                "       op.opcname AS operator_class, "
+                "       idx.indisvalid AS is_valid, "
+                "       idx.indisready AS is_ready, "
+                "       idx.indislive AS is_live, "
+                "       c.reltuples::bigint AS reltuples, "
+                "       c.relpages::bigint AS relpages, "
+                "       pg_relation_size(c.oid) AS size_bytes, "
+                "       pg_get_indexdef(idx.indexrelid, 1, true) AS column_expression "
+                "FROM pg_class c "
+                "JOIN pg_index idx ON idx.indexrelid = c.oid "
+                "JOIN pg_am am ON am.oid = c.relam "
+                "LEFT JOIN pg_opclass op ON op.oid = idx.indclass[0] "
+                "JOIN pg_indexes i ON i.indexname = c.relname "
+                "WHERE c.oid = to_regclass(%s)",
+                (expected_name,),
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        raise ValueError(f"HNSW index {expected_name} does not exist")
+    problems: list[str] = []
+    if row["table_name"] != expected_table:
+        problems.append(f"indexed table is {row['table_name']}, expected {expected_table}")
+    if row["access_method"] != "hnsw":
+        problems.append(f"access method is {row['access_method']}, expected hnsw")
+    if row["operator_class"] != expected_opclass:
+        problems.append(
+            f"operator class is {row['operator_class']}, expected {expected_opclass}"
+        )
+    if "embedding" not in (row["column_expression"] or ""):
+        problems.append(f"indexed column is {row['column_expression']!r}, expected embedding")
+    for flag in ("is_valid", "is_ready", "is_live"):
+        if not row[flag]:
+            problems.append(f"index flag {flag} is false")
+    if problems:
+        raise ValueError(
+            f"HNSW index {expected_name} is not usable: " + "; ".join(problems)
+        )
+    return IndexVerification(
+        index_name=str(row["index_name"]),
+        access_method=str(row["access_method"]),
+        operator_class=str(row["operator_class"]),
+        table_name=str(row["table_name"]),
+        is_valid=bool(row["is_valid"]),
+        is_ready=bool(row["is_ready"]),
+        is_live=bool(row["is_live"]),
+        reltuples=int(row["reltuples"]) if row["reltuples"] is not None else None,
+        relpages=int(row["relpages"]) if row["relpages"] is not None else None,
+        size_bytes=int(row["size_bytes"]) if row["size_bytes"] is not None else None,
+        column_expression=str(row["column_expression"]),
+    )
+
+
+def _catalog_index_is_usable(dataset_id: int, metric: DistanceMetric) -> bool:
+    try:
+        verify_hnsw_index(dataset_id, metric)
+        return True
+    except ValueError:
+        return False
+
+
 def analyze(dataset_id: int) -> None:
     """Refresh planner statistics so it can pick the right access path."""
     with connection() as conn:
@@ -531,6 +653,12 @@ class RetrievalResult:
     plan: str
     used_sequential_scan: bool = False
     applied_ef_search: int | None = None
+    planner_mode: str = "natural"
+    plan_checks: int = 0
+    index_scan_checks: int = 0
+    sequential_scan_checks: int = 0
+    plan_check_plan: str = ""
+    index_verification: dict[str, object] | None = None
 
 
 def _distance_expr(metric: DistanceMetric, use_operator: bool) -> sql.Composable:
@@ -578,13 +706,22 @@ def _query_sql(
 
 
 def _explain_sql(
-    dataset_id: int, metric: DistanceMetric, k: int, use_operator: bool
+    dataset_id: int,
+    metric: DistanceMetric,
+    k: int,
+    use_operator: bool,
+    detailed: bool = True,
 ) -> sql.Composed:
     dist = _distance_expr(metric, use_operator)
     order = _order_expr(dist, use_operator)
-    return sql.SQL(
+    prefix = (
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) "
-        "SELECT id, label, {dist} AS distance "
+        if detailed
+        else "EXPLAIN (FORMAT TEXT) "
+    )
+    return sql.SQL(
+        prefix
+        + "SELECT id, label, {dist} AS distance "
         "FROM {t} "
         "ORDER BY {order} "
         "LIMIT {k}"
@@ -596,68 +733,146 @@ def _explain_sql(
     )
 
 
-def retrieve(
+def _read_ef_search(cur) -> int | None:
+    """Read the GUC from this exact cursor, or None if it is not defined yet."""
+    try:
+        cur.execute("SHOW hnsw.ef_search")
+    except UndefinedObject:
+        return None
+    row = cur.fetchone()
+    return int(row["hnsw.ef_search"]) if row else None
+
+
+def _set_ef_search(cur, ef_search: int, transaction_local: bool = False) -> int | None:
+    """Apply ef_search on the executing connection and prove it took effect."""
+    previous = _read_ef_search(cur)
+    keyword = "SET LOCAL" if transaction_local else "SET"
+    cur.execute(f"{keyword} hnsw.ef_search = {int(ef_search)}")
+    applied = _read_ef_search(cur)
+    if applied != int(ef_search):
+        raise RuntimeError(
+            f"hnsw.ef_search was not applied: requested {ef_search}, server reported {applied}"
+        )
+    return previous
+
+
+def _restore_ef_search(cur, previous: int | None, transaction_local: bool = False) -> None:
+    if transaction_local:
+        # The surrounding explicit transaction is rolled back, so SET LOCAL
+        # expires without any action here.
+        return
+    if previous is None:
+        cur.execute("RESET hnsw.ef_search")
+    else:
+        cur.execute(f"SET hnsw.ef_search = {int(previous)}")
+
+
+def _check_plan(
+    cur,
+    dataset_id: int,
+    metric: DistanceMetric,
+    k: int,
+    use_operator: bool,
+    vector: str,
+    detailed: bool,
+) -> tuple[str, bool, bool]:
+    """Run EXPLAIN for the exact SQL shape just timed and classify its access path."""
+    cur.execute(
+        _explain_sql(dataset_id, metric, k, use_operator, detailed=detailed),
+        (vector, vector),
+    )
+    plan = "\n".join(r["QUERY PLAN"] for r in cur.fetchall())
+    return (
+        plan,
+        plan_uses_index_scan(plan, index_name(dataset_id)),
+        plan_uses_sequential_scan(plan),
+    )
+
+
+def _retrieve_on_cursor(
+    cur,
     query_vector: str,
     k: int,
     metric: DistanceMetric,
     dataset_id: int,
-    method: str = "exact",
-    ef_search: int | None = None,
-    use_operator: bool = True,
-    warmup: bool = True,
-    verify_plan: bool = True,
+    *,
+    method: str,
+    ef_search: int | None,
+    use_operator: bool,
+    warmup: bool,
+    verify_plan: bool,
+    detailed_plan: bool,
+    planner_mode: str,
+    transaction_local_ef: bool,
 ) -> RetrievalResult:
-    """Run a single nearest-neighbour query and time it.
-
-    ``method='exact'`` uses the distance *function* form, which can never be
-    satisfied by an index and therefore guarantees an exhaustive scan.
-    ``method='hnsw'`` uses the *operator* form so the planner can choose an
-    HNSW index scan.
-
-    The search-effort parameter is set at *session* level rather than with
-    ``SET LOCAL``, because the connection pool runs in autocommit mode where
-    ``SET LOCAL`` is silently discarded. The value is read back from the
-    server to confirm that it was actually applied, and it is restored in a
-    ``finally`` block so that a pooled connection never leaks the setting
-    into a later request.
-    """
+    """Execute one timed query on an already borrowed connection."""
     use_op = method == "hnsw" and use_operator
+    verification: dict[str, object] | None = None
+    if method == "hnsw":
+        if planner_mode not in PLANNER_MODES:
+            raise ValueError(f"unknown planner mode: {planner_mode!r}")
+        if ef_search is None:
+            raise ValueError("ef_search is required for HNSW retrieval")
+        verification = verify_hnsw_index(dataset_id, metric).as_dict()
+
+    previous_ef: int | None = None
     applied_ef: int | None = None
+    stmt = _query_sql(dataset_id, metric, k, use_op)
+    params = (query_vector, query_vector)
 
-    with connection() as conn:
-        with conn.cursor() as cur:
-            if ef_search is not None:
-                cur.execute(f"SET hnsw.ef_search = {int(ef_search)}")
-                # Confirm the server actually took the value.
-                cur.execute("SHOW hnsw.ef_search")
-                row = cur.fetchone()
-                applied_ef = int(row["hnsw.ef_search"]) if row else None
-            try:
-                stmt = _query_sql(dataset_id, metric, k, use_op)
-                params: tuple = (query_vector, query_vector)
+    try:
+        if ef_search is not None:
+            previous_ef = _set_ef_search(
+                cur, ef_search, transaction_local=transaction_local_ef
+            )
+            applied_ef = _read_ef_search(cur)
 
-                # Warm-up run so that the measured latency is not dominated by
-                # first-call planning and buffer-cache population.
-                if warmup:
-                    cur.execute(stmt, params)
-                    cur.fetchall()
+        if warmup:
+            cur.execute(stmt, params)
+            cur.fetchall()
 
-                start = time.perf_counter()
-                cur.execute(stmt, params)
-                rows = cur.fetchall()
-                elapsed_ms = (time.perf_counter() - start) * 1000
+        start = time.perf_counter()
+        cur.execute(stmt, params)
+        rows = cur.fetchall()
+        elapsed_ms = (time.perf_counter() - start) * 1000
 
-                plan = ""
-                used_index = False
-                used_seq_scan = False
-                if verify_plan:
-                    cur.execute(_explain_sql(dataset_id, metric, k, use_op), params)
-                    plan = "\n".join(r["QUERY PLAN"] for r in cur.fetchall())
-                    used_index = plan_uses_index_scan(plan, index_name(dataset_id))
-                    used_seq_scan = plan_uses_sequential_scan(plan)
-            finally:
-                if ef_search is not None:
-                    cur.execute("RESET hnsw.ef_search")
+        detailed_text = ""
+        check_plan_text = ""
+        used_index = False
+        used_seq_scan = False
+        checks = 0
+        index_checks = 0
+        seq_checks = 0
+
+        if verify_plan:
+            if detailed_plan:
+                detailed_text, used_index, used_seq_scan = _check_plan(
+                    cur, dataset_id, metric, k, use_op, query_vector, detailed=True
+                )
+                checks = 1
+                index_checks = 1 if used_index else 0
+                seq_checks = 1 if used_seq_scan else 0
+            if method == "hnsw":
+                # A cheap EXPLAIN (no ANALYZE) after the timer stops confirms
+                # that this individual timed query used the verified index,
+                # without executing the query again or warming buffers.
+                check_plan_text, per_query_index, per_query_seq = _check_plan(
+                    cur, dataset_id, metric, k, use_op, query_vector, detailed=False
+                )
+                checks += 1
+                index_checks += 1 if per_query_index else 0
+                seq_checks += 1 if per_query_seq else 0
+                if detailed_plan:
+                    used_index = used_index and per_query_index
+                    used_seq_scan = used_seq_scan or per_query_seq
+                else:
+                    used_index = per_query_index
+                    used_seq_scan = per_query_seq
+    finally:
+        if ef_search is not None:
+            _restore_ef_search(
+                cur, previous_ef, transaction_local=transaction_local_ef
+            )
 
     neighbours = [
         Neighbour(
@@ -671,10 +886,65 @@ def retrieve(
         neighbours=neighbours,
         latency_ms=elapsed_ms,
         used_index_scan=used_index,
-        plan=plan,
+        plan=detailed_text,
         used_sequential_scan=used_seq_scan,
         applied_ef_search=applied_ef,
+        planner_mode=planner_mode,
+        plan_checks=checks,
+        index_scan_checks=index_checks,
+        sequential_scan_checks=seq_checks,
+        plan_check_plan=check_plan_text,
+        index_verification=verification,
     )
+
+
+def retrieve(
+    query_vector: str,
+    k: int,
+    metric: DistanceMetric,
+    dataset_id: int,
+    method: str = "exact",
+    ef_search: int | None = None,
+    use_operator: bool = True,
+    warmup: bool = True,
+    verify_plan: bool = True,
+    planner_mode: str = "natural",
+) -> RetrievalResult:
+    """Run a single nearest-neighbour query and time it.
+
+    ``method='exact'`` uses the distance *function* form, which can never be
+    satisfied by an index and therefore guarantees an exhaustive scan.
+    ``method='hnsw'`` uses the *operator* form so the planner can choose an
+    HNSW index scan.
+
+    Natural planner mode is the default and never forces an access path.
+    Controlled HNSW mode is opt-in; callers using it must wrap the whole batch
+    in an explicit transaction so that planner settings are transaction-local.
+    For a direct single query, ``SET LOCAL`` still requires a transaction, so
+    this helper uses the session-level form and restores the previous value.
+    """
+    if planner_mode not in PLANNER_MODES:
+        raise ValueError(f"unknown planner mode: {planner_mode!r}")
+    if method == "hnsw":
+        # Invalid HNSW runs must never be silently accepted.
+        verify_plan = True
+    with connection() as conn:
+        with conn.cursor() as cur:
+            return _retrieve_on_cursor(
+                cur,
+                query_vector,
+                k,
+                metric,
+                dataset_id,
+                method=method,
+                ef_search=ef_search,
+                use_operator=use_operator,
+                warmup=warmup,
+                verify_plan=verify_plan,
+                detailed_plan=True,
+                planner_mode=planner_mode,
+                transaction_local_ef=False,
+            )
 
 
 @dataclass
@@ -701,6 +971,13 @@ class BatchResult:
     used_index_scan: bool = False
     used_sequential_scan: bool = False
     applied_ef_search: int | None = None
+    planner_mode: str = "natural"
+    plan_checks: int = 0
+    index_scan_checks: int = 0
+    sequential_scan_checks: int = 0
+    plan_check_plan: str = ""
+    index_verification: dict[str, object] | None = None
+    planner_settings: dict[str, str] = field(default_factory=dict)
 
     @property
     def results(self) -> list[RetrievalResult]:
@@ -730,57 +1007,137 @@ def retrieve_batch(
     ef_search: int | None = None,
     repetitions: int = 1,
     verify_plan: bool = True,
+    planner_mode: str = "natural",
 ) -> BatchResult:
     """Run the query set ``repetitions`` times over the same vectors.
 
-    Each repetition is a complete timed pass over the whole query set. The
-    query order is identical in every repetition: the repetitions are
-    intended to expose run-to-run variability in timing and index traversal,
-    not to resample the query set. They are therefore **not** independent
-    observations of a population.
+    Natural planner mode (default) leaves plan choice to PostgreSQL and keeps
+    the original per-query connection behavior. Controlled HNSW mode is
+    opt-in: it borrows one connection, opens an explicit transaction, issues
+    ``SET LOCAL enable_seqscan = off`` and rolls the transaction back at the
+    end. The two modes are mutually exclusive and are never pooled together.
 
-    The execution plan is verified once, on the first query of the first
-    repetition, and the captured plan/flags are reported for the whole batch.
-    Running ``EXPLAIN (ANALYZE)`` for every query would double the work and
-    interleave planner execution with the timed measurements.
-
-    One warm-up query is executed before the first measurement and discarded.
+    HNSW plan verification is mandatory. A detailed ``EXPLAIN (ANALYZE,
+    BUFFERS)`` is captured for the first query as a diagnostic, and a cheap
+    ``EXPLAIN`` is captured after *every* timed HNSW query to confirm that the
+    plan belongs to that query without re-executing it.
     """
     if repetitions < 1:
         raise ValueError(f"repetitions must be at least 1 (got {repetitions})")
+    if planner_mode not in PLANNER_MODES:
+        raise ValueError(f"unknown planner mode: {planner_mode!r}")
+    if planner_mode == "controlled_hnsw" and method != "hnsw":
+        raise ValueError("controlled_hnsw planner mode requires method='hnsw'")
+    if method == "hnsw":
+        verify_plan = True
 
     repetition_results: list[list[RetrievalResult]] = []
     repetition_latencies: list[list[float]] = []
     plan = ""
+    plan_check_plan = ""
     used_index = False
     used_seq = False
     applied_ef: int | None = None
+    index_verification: dict[str, object] | None = None
+    planner_settings: dict[str, str] = {}
+    plan_checks = 0
+    index_scan_checks = 0
+    sequential_scan_checks = 0
 
-    for repetition in range(repetitions):
-        current: list[RetrievalResult] = []
-        latencies: list[float] = []
-        for i, vec in enumerate(query_vectors):
-            first = repetition == 0 and i == 0
-            result = retrieve(
-                query_vector=vec,
-                k=k,
-                metric=metric,
-                dataset_id=dataset_id,
-                method=method,
-                ef_search=ef_search,
-                # The warm-up must precede the first timed query only.
-                warmup=first,
-                verify_plan=verify_plan and first,
-            )
-            current.append(result)
-            latencies.append(result.latency_ms)
-            if first:
-                plan = result.plan
-                used_index = result.used_index_scan
-                used_seq = result.used_sequential_scan
-                applied_ef = result.applied_ef_search
-        repetition_results.append(current)
-        repetition_latencies.append(latencies)
+    def accumulate(result: RetrievalResult, first: bool) -> None:
+        nonlocal plan, plan_check_plan, used_index, used_seq, applied_ef
+        nonlocal index_verification, plan_checks, index_scan_checks, sequential_scan_checks
+        if first:
+            plan = result.plan
+            plan_check_plan = result.plan_check_plan
+            used_index = result.used_index_scan
+            used_seq = result.used_sequential_scan
+            applied_ef = result.applied_ef_search
+            index_verification = result.index_verification
+        else:
+            used_index = used_index and result.used_index_scan
+            used_seq = used_seq or result.used_sequential_scan
+        plan_checks += result.plan_checks
+        index_scan_checks += result.index_scan_checks
+        sequential_scan_checks += result.sequential_scan_checks
+
+    def snapshot(cur) -> dict[str, str]:
+        cur.execute("SHOW enable_seqscan")
+        snapshot_value = {
+            "enable_seqscan": str(cur.fetchone()["enable_seqscan"]),
+            "hnsw.ef_search": str(_read_ef_search(cur)),
+        }
+        return snapshot_value
+
+    if planner_mode == "controlled_hnsw":
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("BEGIN")
+                try:
+                    cur.execute("SET LOCAL enable_seqscan = off")
+                    for repetition in range(repetitions):
+                        current: list[RetrievalResult] = []
+                        latencies: list[float] = []
+                        for i, vec in enumerate(query_vectors):
+                            first = repetition == 0 and i == 0
+                            result = _retrieve_on_cursor(
+                                cur,
+                                vec,
+                                k,
+                                metric,
+                                dataset_id,
+                                method=method,
+                                ef_search=ef_search,
+                                use_operator=True,
+                                warmup=first,
+                                verify_plan=verify_plan,
+                                detailed_plan=first,
+                                planner_mode=planner_mode,
+                                transaction_local_ef=True,
+                            )
+                            current.append(result)
+                            latencies.append(result.latency_ms)
+                            if first:
+                                planner_settings = snapshot(cur)
+                            accumulate(result, first)
+                        repetition_results.append(current)
+                        repetition_latencies.append(latencies)
+                except Exception:
+                    cur.execute("ROLLBACK")
+                    raise
+                cur.execute("ROLLBACK")
+    else:
+        for repetition in range(repetitions):
+            current = []
+            latencies = []
+            for i, vec in enumerate(query_vectors):
+                first = repetition == 0 and i == 0
+                with connection() as conn:
+                    with conn.cursor() as cur:
+                        result = _retrieve_on_cursor(
+                            cur,
+                            vec,
+                            k,
+                            metric,
+                            dataset_id,
+                            method=method,
+                            ef_search=ef_search,
+                            use_operator=True,
+                            warmup=first,
+                            verify_plan=(
+                                verify_plan if method == "hnsw" else (verify_plan and first)
+                            ),
+                            detailed_plan=first,
+                            planner_mode=planner_mode,
+                            transaction_local_ef=False,
+                        )
+                        if first:
+                            planner_settings = snapshot(cur)
+                current.append(result)
+                latencies.append(result.latency_ms)
+                accumulate(result, first)
+            repetition_results.append(current)
+            repetition_latencies.append(latencies)
 
     return BatchResult(
         repetition_results=repetition_results,
@@ -791,6 +1148,13 @@ def retrieve_batch(
         used_index_scan=used_index,
         used_sequential_scan=used_seq,
         applied_ef_search=applied_ef,
+        planner_mode=planner_mode,
+        plan_checks=plan_checks,
+        index_scan_checks=index_scan_checks,
+        sequential_scan_checks=sequential_scan_checks,
+        plan_check_plan=plan_check_plan,
+        index_verification=index_verification,
+        planner_settings=planner_settings,
     )
 
 

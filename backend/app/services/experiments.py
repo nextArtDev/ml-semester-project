@@ -70,6 +70,9 @@ class ExperimentConfig:
     distance_metric: DistanceMetric = DistanceMetric.L2
     method: str = "exact"  # 'exact' | 'hnsw'
     ef_search: int | None = None
+    # 'natural' keeps PostgreSQL's original planner behavior. 'controlled_hnsw'
+    # is opt-in and encourages the index with transaction-local settings.
+    planner_mode: str = "natural"
     hnsw_m: int = 16
     hnsw_ef_construction: int = 64
     max_queries: int | None = 2_000
@@ -96,6 +99,13 @@ class ExperimentConfig:
             raise ValueError(
                 f"method must be 'exact' or 'hnsw' (got {self.method!r})"
             )
+        if self.planner_mode not in vs.PLANNER_MODES:
+            raise ValueError(
+                f"planner_mode must be one of {vs.PLANNER_MODES} "
+                f"(got {self.planner_mode!r})"
+            )
+        if self.planner_mode == "controlled_hnsw" and self.method != "hnsw":
+            raise ValueError("controlled_hnsw planner mode requires method='hnsw'")
         if self.k < 1:
             raise ValueError(f"k must be at least 1 (got {self.k})")
         if self.repetitions < 1:
@@ -116,6 +126,51 @@ class ExperimentConfig:
             raise ValueError("benchmark_round must be at least 1")
         if self.benchmark_position is not None and self.benchmark_position < 1:
             raise ValueError("benchmark_position must be at least 1")
+
+
+def _batch_validity_errors(config: ExperimentConfig, batch) -> list[str]:
+    """Reasons why this run must not be treated as a valid scientific result."""
+    errors: list[str] = []
+    if config.method != "hnsw":
+        return errors
+    if batch.applied_ef_search != config.ef_search:
+        errors.append(
+            f"ef_search mismatch: requested {config.ef_search}, "
+            f"applied {batch.applied_ef_search}"
+        )
+    if not batch.used_index_scan:
+        errors.append("HNSW run did not use the verified HNSW index")
+    if batch.used_sequential_scan:
+        errors.append("HNSW run used a sequential scan")
+    if batch.plan_checks < batch.sample_count:
+        errors.append(
+            f"plan verified for {batch.plan_checks} checks but "
+            f"{batch.sample_count} timed queries were executed"
+        )
+    enforced = (batch.planner_settings or {}).get("enable_seqscan")
+    if config.planner_mode == "controlled_hnsw" and enforced != "off":
+        errors.append("controlled HNSW mode did not apply transaction-local enable_seqscan=off")
+    if config.planner_mode == "natural" and enforced == "off":
+        errors.append("natural planner mode unexpectedly ran with enable_seqscan=off")
+    return errors
+
+
+def _row_validity_errors(row: dict) -> list[str]:
+    """Validity check used when serialising/comparing persisted experiments."""
+    errors: list[str] = []
+    if row.get("status") != "completed":
+        errors.append(f"experiment status is {row.get('status')!r}, not 'completed'")
+    if row.get("retrieval_method") == "hnsw" and row.get("used_index_scan") is not True:
+        errors.append("persisted HNSW row does not report an index scan")
+    environment = row.get("environment") or {}
+    if isinstance(environment, str):
+        try:
+            environment = json.loads(environment)
+        except json.JSONDecodeError:
+            environment = {}
+    if environment.get("valid_for_summary") is False:
+        errors.append("experiment is marked invalid for scientific summaries")
+    return errors
 
 
 def _load_test_vectors(dataset_id: int, limit: int | None) -> list[tuple[int, int, str]]:
@@ -295,6 +350,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
         method=config.method,
         ef_search=config.ef_search,
         repetitions=config.repetitions,
+        planner_mode=config.planner_mode,
     )
     retrieval_batch_wall_time_s = time.perf_counter() - retrieval_started
 
@@ -370,6 +426,9 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
     used_index = batch.used_index_scan
     used_seq_scan = batch.used_sequential_scan
     applied_ef = batch.applied_ef_search
+    validity_errors = _batch_validity_errors(config, batch)
+    run_status = "failed" if validity_errors else "completed"
+    error_message = "; ".join(validity_errors) if validity_errors else None
 
     index_build_s = (index_build_ms / 1000.0) if index_build_ms is not None else 0.0
 
@@ -467,6 +526,17 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
                 "run_id": config.run_id,
                 "ground_truth_cache_hit": cache_hit,
                 "benchmark_cache": "warm buffer cache; no cold-cache procedure was executed",
+                # --- Phase 2 access-path diagnostics -----------------------
+                "planner_mode": config.planner_mode,
+                "planner_settings": batch.planner_settings,
+                "execution_plan": batch.plan,
+                "per_query_plan": batch.plan_check_plan,
+                "plan_checks": batch.plan_checks,
+                "index_scan_checks": batch.index_scan_checks,
+                "sequential_scan_checks": batch.sequential_scan_checks,
+                "verified_index": batch.index_verification,
+                "validity_errors": validity_errors,
+                "valid_for_summary": not validity_errors,
             }
         ),
         "confusion_matrix": json.dumps(last_metrics.confusion_matrix),
@@ -479,7 +549,8 @@ def run_experiment(config: ExperimentConfig) -> dict[str, Any]:
             },
             default=str,
         ),
-        "status": "completed",
+        "status": run_status,
+        "error_message": error_message,
     }
 
     persistence_started = time.perf_counter()
@@ -651,38 +722,50 @@ def _insert_latencies(experiment_id: int, batch) -> None:
 # Comparison
 # ---------------------------------------------------------------------------
 def compare_experiments(exact_id: int, approx_id: int) -> dict[str, Any]:
-    """Compare two experiments row by row."""
+    """Compare two experiments row by row.
+
+    Invalid runs are still returned for inspection, but their numeric deltas
+    are suppressed so they cannot enter a valid scientific summary.
+    """
     exact = fetch_one("SELECT * FROM experiments WHERE id = %s", (exact_id,))
     approx = fetch_one("SELECT * FROM experiments WHERE id = %s", (approx_id,))
     if exact is None or approx is None:
         raise ValueError("Both experiment ids must exist")
+    exact_errors = _row_validity_errors(exact)
+    approx_errors = _row_validity_errors(approx)
+    valid = not exact_errors and not approx_errors
 
     def delta(a: float | None, b: float | None) -> float | None:
         if a is None or b is None:
             return None
         return float(b) - float(a)
 
+    deltas: dict[str, Any] = {
+        "accuracy": delta(exact["accuracy"], approx["accuracy"]),
+        "precision_macro": delta(exact["precision_macro"], approx["precision_macro"]),
+        "recall_macro": delta(exact["recall_macro"], approx["recall_macro"]),
+        "macro_f1": delta(exact["macro_f1"], approx["macro_f1"]),
+        "recall_at_k": delta(exact["recall_at_k"], approx["recall_at_k"]),
+        "tie_aware_recall_at_k": delta(
+            exact["tie_aware_recall_at_k"], approx["tie_aware_recall_at_k"]
+        ),
+        "latency_avg_ms": delta(exact["latency_avg_ms"], approx["latency_avg_ms"]),
+        "latency_p50_ms": delta(exact["latency_p50_ms"], approx["latency_p50_ms"]),
+        "latency_p95_ms": delta(exact["latency_p95_ms"], approx["latency_p95_ms"]),
+        "speedup": (
+            exact["latency_avg_ms"] / approx["latency_avg_ms"]
+            if approx["latency_avg_ms"]
+            else None
+        ),
+    }
+    if not valid:
+        deltas = {key: None for key in deltas}
     return {
         "exact": _serialize_experiment(exact),
         "approximate": _serialize_experiment(approx),
-        "deltas": {
-            "accuracy": delta(exact["accuracy"], approx["accuracy"]),
-            "precision_macro": delta(exact["precision_macro"], approx["precision_macro"]),
-            "recall_macro": delta(exact["recall_macro"], approx["recall_macro"]),
-            "macro_f1": delta(exact["macro_f1"], approx["macro_f1"]),
-            "recall_at_k": delta(exact["recall_at_k"], approx["recall_at_k"]),
-            "tie_aware_recall_at_k": delta(
-                exact["tie_aware_recall_at_k"], approx["tie_aware_recall_at_k"]
-            ),
-            "latency_avg_ms": delta(exact["latency_avg_ms"], approx["latency_avg_ms"]),
-            "latency_p50_ms": delta(exact["latency_p50_ms"], approx["latency_p50_ms"]),
-            "latency_p95_ms": delta(exact["latency_p95_ms"], approx["latency_p95_ms"]),
-            "speedup": (
-                exact["latency_avg_ms"] / approx["latency_avg_ms"]
-                if approx["latency_avg_ms"]
-                else None
-            ),
-        },
+        "deltas": deltas,
+        "valid": valid,
+        "validity_errors": {"exact": exact_errors, "approximate": approx_errors},
     }
 
 

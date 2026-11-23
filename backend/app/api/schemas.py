@@ -66,6 +66,7 @@ class ExperimentRequest(BaseModel):
     distance_metric: Literal["l2", "cosine", "l1"] = "l2"
     method: Literal["exact", "hnsw"] = "exact"
     ef_search: int | None = Field(None, ge=1, le=1000)
+    planner_mode: Literal["natural", "controlled_hnsw"] = "natural"
     hnsw_m: int = Field(16, ge=2, le=128)
     hnsw_ef_construction: int = Field(64, ge=4, le=1000)
     max_queries: int | None = Field(2_000, ge=1, le=50_000)
@@ -82,6 +83,8 @@ class ExperimentRequest(BaseModel):
     def _validate_method(self) -> "ExperimentRequest":
         if self.method == "hnsw" and self.ef_search is None:
             raise ValueError("ef_search is required when method is 'hnsw'")
+        if self.planner_mode == "controlled_hnsw" and self.method != "hnsw":
+            raise ValueError("controlled_hnsw planner mode requires method='hnsw'")
         return self
 
 
@@ -113,6 +116,7 @@ class ExperimentSummary(BaseModel):
     used_index_scan: bool | None = None
     status: str
     created_at: str
+    planner_mode: str = "natural"
 
 
 # ---------------------------------------------------------------------------
