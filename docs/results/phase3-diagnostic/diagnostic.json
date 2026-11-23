@@ -1,0 +1,349 @@
+{
+  "parent_dataset_id": 116,
+  "sizes": {
+    "10000": {
+      "dataset_id": 2,
+      "target_size": 10000,
+      "actual_size": 10000,
+      "dataset_fingerprint": "f13de289c970d19e1c00c95afb49461e",
+      "selected_id_count": 10000,
+      "selected_id_sha256": "6205c393930ed0351b3399fa36b5290d092357d2fdee289a59b8e6dd61fb9ad4",
+      "preprocessing_state_sha256": "c51634ae1fffc922f3f3db770ec90c6fefa0e9fb54b225d13d4228421588094a",
+      "variant_identity_sha256": "e2d530c30776a74a70c56c0ef593e1a16f33379cfeca2bf9d0a109670da5c8f6",
+      "index_name": "fv_2_embedding_hnsw_idx",
+      "m": 16,
+      "ef_construction": 64,
+      "natural": {
+        "10": {
+          "shown_ef": "10",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=59.03..61.07 rows=5 width=26) (actual time=0.098..0.102 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=59.03..61.07 rows=5 width=26) (actual time=0.098..0.102 rows=5.00 loops=1)\n  Buffers: shared hit=163\n  ->  Index Scan using fv_2_embedding_hnsw_idx on fv_2  (cost=59.03..4149.00 rows=10000 width=26) (actual time=0.098..0.101 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.6640268,-0.5264665,-0.28196964,-0.14775242,-1.2810127,0.5964516,1.0057741,-0.048542306,-0.80435324,2.3443317,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=163\nPlanning:\n  Buffers: shared hit=56\nPlanning Time: 1.790 ms\nExecution Time: 0.240 ms"
+        },
+        "50": {
+          "shown_ef": "50",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=168.69..170.68 rows=5 width=26) (actual time=0.210..0.213 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=168.69..170.68 rows=5 width=26) (actual time=0.210..0.213 rows=5.00 loops=1)\n  Buffers: shared hit=466\n  ->  Index Scan using fv_2_embedding_hnsw_idx on fv_2  (cost=168.69..4149.00 rows=10000 width=26) (actual time=0.209..0.212 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.6640268,-0.5264665,-0.28196964,-0.14775242,-1.2810127,0.5964516,1.0057741,-0.048542306,-0.80435324,2.3443317,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=466\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.036 ms\nExecution Time: 0.222 ms"
+        },
+        "100": {
+          "shown_ef": "100",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=286.19..288.12 rows=5 width=26) (actual time=0.271..0.273 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=286.19..288.12 rows=5 width=26) (actual time=0.271..0.273 rows=5.00 loops=1)\n  Buffers: shared hit=739\n  ->  Index Scan using fv_2_embedding_hnsw_idx on fv_2  (cost=286.19..4149.00 rows=10000 width=26) (actual time=0.270..0.273 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.6640268,-0.5264665,-0.28196964,-0.14775242,-1.2810127,0.5964516,1.0057741,-0.048542306,-0.80435324,2.3443317,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=739\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.033 ms\nExecution Time: 0.283 ms"
+        },
+        "400": {
+          "shown_ef": "400",
+          "access_path": "Seq Scan",
+          "top_line": "Limit  (cost=660.10..660.11 rows=5 width=26) (actual time=2.559..2.560 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=660.10..660.11 rows=5 width=26) (actual time=2.559..2.560 rows=5.00 loops=1)\n  Buffers: shared hit=344\n  ->  Sort  (cost=660.10..685.10 rows=10000 width=26) (actual time=2.559..2.559 rows=5.00 loops=1)\n        Sort Key: ((embedding <-> '[0.6640268,-0.5264665,-0.28196964,-0.14775242,-1.2810127,0.5964516,1.0057741,-0.048542306,-0.80435324,2.3443317,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector))\n        Sort Method: top-N heapsort  Memory: 25kB\n        Buffers: shared hit=344\n        ->  Seq Scan on fv_2  (cost=0.00..494.00 rows=10000 width=26) (actual time=0.009..1.751 rows=10000.00 loops=1)\n              Buffers: shared hit=344\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.033 ms\nExecution Time: 2.574 ms"
+        },
+        "run_10": {
+          "experiment_id": 2,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_50": {
+          "experiment_id": 4,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_100": {
+          "experiment_id": 6,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_400": {
+          "experiment_id": 8,
+          "status": "failed",
+          "used_index_scan": false,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": "HNSW run did not use the verified HNSW index; HNSW run used a sequential scan",
+          "planner_settings": null
+        }
+      },
+      "controlled": {
+        "run_10": {
+          "experiment_id": 3,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_50": {
+          "experiment_id": 5,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_100": {
+          "experiment_id": 7,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_400": {
+          "experiment_id": 9,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        }
+      }
+    },
+    "20000": {
+      "dataset_id": 3,
+      "target_size": 20000,
+      "actual_size": 20000,
+      "dataset_fingerprint": "bfe85f30e626ddac6df79d821835d8f9",
+      "selected_id_count": 20000,
+      "selected_id_sha256": "4b89855f71939cdeee7b76b6f6cfb2ed3806c42081d71a3e25df17d567db57e2",
+      "preprocessing_state_sha256": "71bdd17d9d13e09b0da2e37c545ef22f35a039eeaf25e97fb255c8b645d9ed76",
+      "variant_identity_sha256": "ff8100cc6c76891d4f131da59d26e5f82703c1aed84f8411a748d198a0bcd22a",
+      "index_name": "fv_3_embedding_hnsw_idx",
+      "m": 16,
+      "ef_construction": 64,
+      "natural": {
+        "10": {
+          "shown_ef": "10",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=62.57..64.67 rows=5 width=26) (actual time=0.107..0.111 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=62.57..64.67 rows=5 width=26) (actual time=0.107..0.111 rows=5.00 loops=1)\n  Buffers: shared hit=184\n  ->  Index Scan using fv_3_embedding_hnsw_idx on fv_3  (cost=62.57..8462.00 rows=20000 width=26) (actual time=0.107..0.111 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.6660709,-0.5320691,-0.2783856,-0.14359625,-1.2805563,0.6026803,0.9978928,-0.05743491,-0.80079263,2.3642628,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=184\nPlanning:\n  Buffers: shared hit=41\nPlanning Time: 1.669 ms\nExecution Time: 0.122 ms"
+        },
+        "50": {
+          "shown_ef": "50",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=180.58..182.65 rows=5 width=26) (actual time=0.213..0.217 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=180.58..182.65 rows=5 width=26) (actual time=0.213..0.217 rows=5.00 loops=1)\n  Buffers: shared hit=443\n  ->  Index Scan using fv_3_embedding_hnsw_idx on fv_3  (cost=180.58..8462.00 rows=20000 width=26) (actual time=0.213..0.216 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.6660709,-0.5320691,-0.2783856,-0.14359625,-1.2805563,0.6026803,0.9978928,-0.05743491,-0.80079263,2.3642628,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=443\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.036 ms\nExecution Time: 0.226 ms"
+        },
+        "100": {
+          "shown_ef": "100",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=307.01..309.05 rows=5 width=26) (actual time=0.320..0.323 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=307.01..309.05 rows=5 width=26) (actual time=0.320..0.323 rows=5.00 loops=1)\n  Buffers: shared hit=800\n  ->  Index Scan using fv_3_embedding_hnsw_idx on fv_3  (cost=307.01..8462.00 rows=20000 width=26) (actual time=0.320..0.322 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.6660709,-0.5320691,-0.2783856,-0.14359625,-1.2805563,0.6026803,0.9978928,-0.05743491,-0.80079263,2.3642628,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=800\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.034 ms\nExecution Time: 0.333 ms"
+        },
+        "400": {
+          "shown_ef": "400",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=956.74..958.62 rows=5 width=26) (actual time=1.000..1.002 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=956.74..958.62 rows=5 width=26) (actual time=1.000..1.002 rows=5.00 loops=1)\n  Buffers: shared hit=2168\n  ->  Index Scan using fv_3_embedding_hnsw_idx on fv_3  (cost=956.74..8462.00 rows=20000 width=26) (actual time=0.999..1.002 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.6660709,-0.5320691,-0.2783856,-0.14359625,-1.2805563,0.6026803,0.9978928,-0.05743491,-0.80079263,2.3642628,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=2168\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.033 ms\nExecution Time: 1.012 ms"
+        },
+        "run_10": {
+          "experiment_id": 10,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_50": {
+          "experiment_id": 12,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_100": {
+          "experiment_id": 14,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_400": {
+          "experiment_id": 16,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        }
+      },
+      "controlled": {
+        "run_10": {
+          "experiment_id": 11,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_50": {
+          "experiment_id": 13,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_100": {
+          "experiment_id": 15,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_400": {
+          "experiment_id": 17,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        }
+      }
+    },
+    "50000": {
+      "dataset_id": 4,
+      "target_size": 50000,
+      "actual_size": 50000,
+      "dataset_fingerprint": "4ab59c99ecc396826c511e3d5ea06d17",
+      "selected_id_count": 50000,
+      "selected_id_sha256": "b8b8dd49035f090f7642f9dfcf307db32869134c181201cfe02fa37b68e5f1cd",
+      "preprocessing_state_sha256": "24b7e4ec3f6537b20896676886ad964fafa47e8d917d024ed4f1aadf758b9c20",
+      "variant_identity_sha256": "f43095081ffc37f8cf5e42319323deb15438340c9d60d85708b05c6f2f9ac4b2",
+      "index_name": "fv_4_embedding_hnsw_idx",
+      "m": 16,
+      "ef_construction": 64,
+      "natural": {
+        "10": {
+          "shown_ef": "10",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=67.16..69.22 rows=5 width=26) (actual time=0.137..0.142 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=67.16..69.22 rows=5 width=26) (actual time=0.137..0.142 rows=5.00 loops=1)\n  Buffers: shared hit=226\n  ->  Index Scan using fv_4_embedding_hnsw_idx on fv_4  (cost=67.16..20621.00 rows=50000 width=26) (actual time=0.136..0.140 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.66227937,-0.5395701,-0.278438,-0.13952816,-1.27888,0.6096159,1.0045971,-0.061956905,-0.80288464,2.3501954,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=226\nPlanning:\n  Buffers: shared hit=41\nPlanning Time: 1.714 ms\nExecution Time: 0.152 ms"
+        },
+        "50": {
+          "shown_ef": "50",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=196.03..198.07 rows=5 width=26) (actual time=0.202..0.206 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=196.03..198.07 rows=5 width=26) (actual time=0.202..0.206 rows=5.00 loops=1)\n  Buffers: shared hit=388\n  ->  Index Scan using fv_4_embedding_hnsw_idx on fv_4  (cost=196.03..20621.00 rows=50000 width=26) (actual time=0.201..0.205 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.66227937,-0.5395701,-0.278438,-0.13952816,-1.27888,0.6096159,1.0045971,-0.061956905,-0.80288464,2.3501954,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=388\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.037 ms\nExecution Time: 0.215 ms"
+        },
+        "100": {
+          "shown_ef": "100",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=334.10..336.13 rows=5 width=26) (actual time=0.335..0.339 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=334.10..336.13 rows=5 width=26) (actual time=0.335..0.339 rows=5.00 loops=1)\n  Buffers: shared hit=721\n  ->  Index Scan using fv_4_embedding_hnsw_idx on fv_4  (cost=334.10..20621.00 rows=50000 width=26) (actual time=0.335..0.338 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.66227937,-0.5395701,-0.278438,-0.13952816,-1.27888,0.6096159,1.0045971,-0.061956905,-0.80288464,2.3501954,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=721\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.041 ms\nExecution Time: 0.349 ms"
+        },
+        "400": {
+          "shown_ef": "400",
+          "access_path": "HNSW index scan",
+          "top_line": "Limit  (cost=1043.62..1045.57 rows=5 width=26) (actual time=1.168..1.171 rows=5.00 loops=1)",
+          "plan": "Limit  (cost=1043.62..1045.57 rows=5 width=26) (actual time=1.168..1.171 rows=5.00 loops=1)\n  Buffers: shared hit=2309\n  ->  Index Scan using fv_4_embedding_hnsw_idx on fv_4  (cost=1043.62..20621.00 rows=50000 width=26) (actual time=1.168..1.171 rows=5.00 loops=1)\n        Order By: (embedding <-> '[0.66227937,-0.5395701,-0.278438,-0.13952816,-1.27888,0.6096159,1.0045971,-0.061956905,-0.80288464,2.3501954,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]'::vector)\n        Index Searches: 1\n        Buffers: shared hit=2309\nPlanning:\n  Buffers: shared hit=1\nPlanning Time: 0.035 ms\nExecution Time: 1.214 ms"
+        },
+        "run_10": {
+          "experiment_id": 18,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_50": {
+          "experiment_id": 20,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_100": {
+          "experiment_id": 22,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_400": {
+          "experiment_id": 24,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        }
+      },
+      "controlled": {
+        "run_10": {
+          "experiment_id": 19,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_50": {
+          "experiment_id": 21,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_100": {
+          "experiment_id": 23,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        },
+        "run_400": {
+          "experiment_id": 25,
+          "status": "completed",
+          "used_index_scan": true,
+          "used_sequential_scan": null,
+          "applied_ef_search": null,
+          "error_message": null,
+          "planner_settings": null
+        }
+      }
+    }
+  },
+  "server": {
+    "db": "test_phase3_diag",
+    "version": "PostgreSQL 18.0 on x86_64-windows, compiled by msvc-19.44.35217, 64-bit",
+    "pgvector": "0.8.7"
+  }
+}
