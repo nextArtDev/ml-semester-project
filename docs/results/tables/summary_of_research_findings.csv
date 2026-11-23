@@ -1,0 +1,10 @@
+research_question,finding,evidence_type
+RQ1,HNSW p50 latency is lower than exact for every valid paired configuration.,Measured + inferential
+RQ2,"Recall@5 losses are small at higher ef and largest at ef=10, especially on 50k.",Measured
+RQ3,Recall and accuracy do not move monotonically together; classification differences are not significant after Holm.,Measured + inferential
+RQ4,"Within each size, higher ef raises latency while improving or preserving Recall@5.",Measured
+RQ5,Latency advantage of HNSW is larger at 50k than 10k.,Measured
+RQ6,Index size is ~5 MB at 10k and ~25 MB at 50k; build time is paid once.,Measured
+RQ7,Controlled HNSW obtains index scans at 10k/ef=400 where natural planner falls back.,"Measured, separate mode"
+RQ8,Exact is preferable when deterministic full recall and simplicity matter more than latency.,Interpretation
+RQ9,HNSW is preferable when warm-cache latency dominates and small recall losses are acceptable.,Interpretation

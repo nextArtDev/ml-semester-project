@@ -1,0 +1,8 @@
+train_size,config,index_build_ms,index_size_bytes,index_size_mb,build_note
+10000,HNSW ef=10,,5226496.0,4.984,index reused; build time not paid again
+10000,HNSW ef=50,1478.5374000002776,5226496.0,4.984,fresh build on first HNSW run
+10000,HNSW ef=100,,5226496.0,4.984,index reused; build time not paid again
+50000,HNSW ef=10,,26083328.0,24.875,index reused; build time not paid again
+50000,HNSW ef=50,3500.2354999996896,26083328.0,24.875,fresh build on first HNSW run
+50000,HNSW ef=100,,26083328.0,24.875,index reused; build time not paid again
+50000,HNSW ef=400,,26083328.0,24.875,index reused; build time not paid again

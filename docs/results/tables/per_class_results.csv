@@ -1,0 +1,2 @@
+availability,reason,consequence
+not_available_in_validated_outputs,PER-CLASS METRICS AND CONFUSION MATRICES WERE RECOMPUTED DURING PROMPT 6 BUT NOT EXPORTED TO docs/results/validated/,No per-class table or confusion-matrix figure is generated; this is an explicit unsupported analysis item.
