@@ -32,7 +32,7 @@ ml-semester-project/
 │   │       ├── preprocessing.py    Leakage-free preprocessing
 │   │       └── vector_store.py     Exact vs HNSW retrieval (pgvector)
 │   ├── scripts/                    Batch runner + dataset statistics
-│   └── tests/        pytest suite (241 passed, 1 skip)
+│   └── tests/        pytest suite (272 passed, 1 skip)
 ├── frontend/         Next.js 16 + TypeScript + Tailwind v4 (bilingual EN/FA)
 │   ├── app/[locale]/ Overview · Datasets · Experiments · Compare · Methodology
 │   ├── components/   UI + feature components
@@ -407,7 +407,7 @@ cd backend
 .venv\Scripts\python -m pytest
 ```
 
-The suite contains **241 passing tests and 1 documented skip** (cosine
+The suite contains **272 passing tests and 1 documented skip** (cosine
 distance is discrete for collinear vectors, so a near-zero non-zero boundary
 cannot be constructed). It covers classification/metric maths, tie-aware and
 conventional Recall@K, tolerance validation for L2/cosine/L1, the leakage
@@ -426,8 +426,11 @@ CSV/JSON consistency.
 
 | Document | Contents |
 | --- | --- |
-| [`docs/Thesis-Final-Verified.docx`](docs/Thesis-Final-Verified.docx) | **Authoritative current thesis** — aligned with the final v3 benchmark, figures and result artifacts |
-| [`docs/archive/Thesis-KNN-PostgreSQL-Platform.docx`](docs/archive/Thesis-KNN-PostgreSQL-Platform.docx) | Superseded earlier thesis; preserved for history only, do not quote for v3 numbers |
+| [`docs/thesis/THESIS.docx`](docs/thesis/THESIS.docx) | **Authoritative current thesis** — validated Phase 5 draft based on the approved four-ef benchmark and validated artifacts |
+| [`docs/thesis/THESIS.md`](docs/thesis/THESIS.md) | Editable source of the current thesis |
+| [`docs/reports/REPRODUCIBILITY-GUIDE.md`](docs/reports/REPRODUCIBILITY-GUIDE.md) | Environment, database, experiment and analysis reproduction commands |
+| [`docs/Thesis-Final-Verified.docx`](docs/Thesis-Final-Verified.docx) | Historical v3 thesis; superseded by the Phase 5 draft, do not quote for current claims |
+| [`docs/archive/Thesis-KNN-PostgreSQL-Platform.docx`](docs/archive/Thesis-KNN-PostgreSQL-Platform.docx) | Superseded earlier thesis; preserved for history only |
 | [`docs/Project-Guide.docx`](docs/Project-Guide.docx) | The function-by-function tour of the database, the backend and the frontend |
 | [`docs/architecture.md`](docs/architecture.md) | The design decisions and the traps they avoid |
 | [`docs/api.md`](docs/api.md) | The HTTP API reference |
@@ -440,13 +443,14 @@ changes:
 
 ```powershell
 cd backend
-.venv\Scripts\python ..\docs\tools\build_final_thesis.py
+.venv\Scripts\python ..\docs\thesis\build_thesis_docx.py
 .venv\Scripts\python ..\docs\tools\build_guide.py
 .venv\Scripts\python ..\docs\tools\verify_snippets.py ..\docs\Project-Guide.docx
 ```
 
-`build_thesis.py` is a legacy builder for the archived, superseded thesis and
-must not be used for current benchmark claims.
+`docs/tools/build_final_thesis.py` and `docs/tools/build_thesis.py` are legacy
+builders for archived, superseded benchmarks and must not be used for current
+scientific claims.
 
 `verify_snippets.py` checks that every Python and TypeScript listing in the
 documents still matches the source tree, and reports any divergence.
